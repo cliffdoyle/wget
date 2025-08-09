@@ -42,4 +42,12 @@ func Execute() {
 func init() {
 	// Normal flags (only for this command)
 	rootCmd.Flags().BoolVarP(&Bflag, "Background", "B", false, "Option for background download and logging")
+	rootCmd.Flags().StringVarP(&Oflag, "Output-document", "O", "", "Option for changing filename")
+	rootCmd.Flags().StringVarP(&Pflag, "directory-prefix", "P", "", "Option for saving a file to a specific directory")
+	rootCmd.Flags().StringVarP(&RateLimit, "rate-limit", "L", "", "limit your donwload speed")
+	rootCmd.Flags().StringVarP(&Iflag, "grouped-links", "I", "", "download from links in a txt file(concurrenlty")
+	rootCmd.Flags().BoolVarP(&Mirror, "mirror", "m", false, "mirror a webpage from link")
+	rootCmd.Flags().StringVarP(&Reject, "reject", "R", "", "list of file suffixes that the program will avoid downloading during the retrieval")
+	rootCmd.Flags().StringVarP(&Exclude, "exclude", "X", "", "Option for background download and logging")
+	rootCmd.Flags().StringVarP(&Convert, "convert-links", "c", "", "convert links in the downloaded files to be viewed offline, changing them to point to the locally downloaded resources")
 }
