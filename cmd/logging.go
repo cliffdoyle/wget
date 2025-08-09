@@ -3,8 +3,6 @@ package cmd
 import (
 	"log"
 	"os"
-
-	"github.com/spf13/cobra"
 )
 
 // logToFile handles logging to "app.log".
@@ -23,21 +21,4 @@ func logToFile(message string) {
 	// Create a logger that writes to the file
 	logger := log.New(file, "", log.LstdFlags)
 	logger.Println(message)
-}
-
-var LogDownload = &cobra.Command{
-	Use:     "B",
-	Aliases: []string{"b"},
-	Short:   "log output to wget-log",
-	Long:    "download a file and log the output in the wget-log file",
-	Args:    cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		// call our main function with a way of calling our logger above
-		// this is a test
-		logToFile("this is a test by me")
-	},
-}
-
-func init() {
-	rootCmd.AddCommand(LogDownload)
 }
