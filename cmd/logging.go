@@ -5,7 +5,7 @@ import (
 	"os"
 )
 
-// logToFile handles logging to "app.log".
+// logToFile handles logging to "wget.log".
 // If the file doesn't exist, it creates it.
 // If it can't open/create the file, it logs to stderr instead.
 func logToFile(message string) {
