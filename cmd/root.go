@@ -7,13 +7,24 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var Bflag bool
+var (
+	Bflag     bool
+	Oflag     string
+	Pflag     string
+	RateLimit string
+	Iflag     string
+	Mirror    bool
+	Reject    string
+	Exclude   string
+	Convert   string
+)
 
 var rootCmd = &cobra.Command{
 	Use:   "wget",
 	Short: "this is a basic wget clone made with go",
 	Long:  "this is wget, a free utility for non-interactive download of files from the Web. It supports HTTP, HTTPS, and FTP protocols, as well as retrieval through HTTP proxies ans website mirroring",
 	Run: func(cmd *cobra.Command, args []string) {
+		// all our logic ,flag checking and args should start off here
 		if Bflag {
 			fmt.Println("we are calling our logger")
 		} else {
@@ -29,6 +40,6 @@ func Execute() {
 	}
 }
 func init() {
-	// Normal flag (only for this command)
+	// Normal flags (only for this command)
 	rootCmd.Flags().BoolVarP(&Bflag, "Background", "B", false, "Option for background download and logging")
 }
