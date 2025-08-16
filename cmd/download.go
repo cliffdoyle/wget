@@ -14,7 +14,6 @@ import (
 )
 
 func Download_file(link string) {
-	// Build fileName from fullPath
 	if strings.Trim(link, " ") == "" {
 		log.Fatal("no link provided")
 	}
