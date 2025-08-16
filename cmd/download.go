@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 )
 
 func Download_file(link string) {
@@ -16,6 +17,13 @@ func Download_file(link string) {
 		log.Fatal("no link provided")
 	}
 
+	currentTime := time.Now()
+	// Define the desired format using the Go reference time
+	// "2006-01-02 15:04:05" corresponds to "yyyy-m-d h-m-s"
+	formattedTime := currentTime.Format("2006-01-02 15:04:05")
+
+	// Print the formatted time
+	fmt.Printf("start at %v\n", formattedTime)
 	fileURL, err := url.Parse(link)
 	if err != nil {
 		log.Fatal(err)
