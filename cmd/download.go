@@ -48,28 +48,17 @@ func Download_file(link string) {
 	defer resp.Body.Close()
 
 	_, err = io.Copy(file, resp.Body)
-
 	defer file.Close()
 }
 
-func HumanSize(size int64) string {
-	const (
-		KB = 1024
-		MB = 1024 * KB
-		GB = 1024 * MB
-		TB = 1024 * GB
-	)
+// BytesToKB converts bytes to kilobytes (KiB = 1024 bytes) and rounds to 2 decimals
+func BytesToKB(size int64) string {
+	kb := float64(size) / 1024
+	return fmt.Sprintf("%.2f KB", kb)
+}
 
-	switch {
-	case size < KB:
-		return fmt.Sprintf("%d B", size)
-	case size < MB:
-		return fmt.Sprintf("%.1f KiB", float64(size)/KB)
-	case size < GB:
-		return fmt.Sprintf("%.1f MiB", float64(size)/MB)
-	case size < TB:
-		return fmt.Sprintf("%.1f GiB", float64(size)/GB)
-	default:
-		return fmt.Sprintf("%.1f TiB", float64(size)/TB)
-	}
+// BytesToMB converts bytes to megabytes (MiB = 1024 * 1024 bytes) and rounds to 2 decimals
+func BytesToMB(size int64) string {
+	mb := float64(size) / (1024 * 1024)
+	return fmt.Sprintf("%.2f MB", mb)
 }
