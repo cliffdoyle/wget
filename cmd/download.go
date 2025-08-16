@@ -79,3 +79,12 @@ func BytesToMB(size int64) string {
 	mb := float64(size) / (1024 * 1024)
 	return fmt.Sprintf("%.2fMB", mb)
 }
+
+func GetTime() string {
+	currentTime := time.Now()
+	// "2006-01-02 15:04:05" corresponds to "yyyy-m-d h-m-s"
+	formattedTime := currentTime.Format("2006-01-02 15:04:05")
+
+	// return the formatted time
+	return formattedTime
+}
