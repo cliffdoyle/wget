@@ -38,7 +38,11 @@ var rootCmd = &cobra.Command{
 		} else if Down.Bflag {
 			fmt.Println("the b flag has been passed ")
 		} else {
-			fmt.Println("no flags passed")
+			if len(args) == 0 {
+				fmt.Fprintf(os.Stderr, "no arguments were provided\n")
+				os.Exit(1)
+			}
+			Download_file(args[0])
 		}
 
 	},
