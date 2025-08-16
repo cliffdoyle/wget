@@ -47,10 +47,29 @@ func Download_file(link string) {
 	}
 	defer resp.Body.Close()
 
-	size, err := io.Copy(file, resp.Body)
+	_, err = io.Copy(file, resp.Body)
 
 	defer file.Close()
+}
 
-	fmt.Printf("Downloaded a file %s with size %d", fileName, size)
+func HumanSize(size int64) string {
+	const (
+		KB = 1024
+		MB = 1024 * KB
+		GB = 1024 * MB
+		TB = 1024 * GB
+	)
 
+	switch {
+	case size < KB:
+		return fmt.Sprintf("%d B", size)
+	case size < MB:
+		return fmt.Sprintf("%.1f KiB", float64(size)/KB)
+	case size < GB:
+		return fmt.Sprintf("%.1f MiB", float64(size)/MB)
+	case size < TB:
+		return fmt.Sprintf("%.1f GiB", float64(size)/GB)
+	default:
+		return fmt.Sprintf("%.1f TiB", float64(size)/TB)
+	}
 }
