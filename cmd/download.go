@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -29,6 +30,11 @@ func Download_file(link string) {
 	// if the flag flag is provided we change it to the provided flag
 	if strings.TrimSpace(Down.Oflag) != "" {
 		fileName = Down.Oflag
+	}
+
+	//check if a filepath has been passed with the p flag
+	if strings.TrimSpace(Down.Pflag) != "" {
+		fileName = filepath.Join(Down.Pflag, fileName)
 	}
 	// Create blank file
 	file, err := os.Create(fileName)
