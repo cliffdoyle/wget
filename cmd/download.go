@@ -49,7 +49,6 @@ func Download_file(link string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Print("sending request, awaiting response ... ")
 	client := http.Client{
 		CheckRedirect: func(r *http.Request, via []*http.Request) error {
 			r.URL.Opaque = r.URL.Path
