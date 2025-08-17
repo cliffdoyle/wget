@@ -26,7 +26,10 @@ func Download_file(link string) {
 	path := fileURL.Path
 	segments := strings.Split(path, "/")
 	fileName := segments[len(segments)-1]
-
+	// if the flag flag is provided we change it to the provided flag
+	if strings.TrimSpace(Down.Oflag) != "" {
+		fileName = Down.Oflag
+	}
 	// Create blank file
 	file, err := os.Create(fileName)
 	if err != nil {
