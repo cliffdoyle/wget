@@ -21,13 +21,11 @@ func Download_file(link string) {
 	var message string
 
 	//check for b flag to decide where the output goes
-	message = fmt.Sprintf("start at %v\n", GetTime())
 	if Down.Bflag {
 		fmt.Println("Output will be written to \"wget-log\".")
-		logToFile(message)
-	} else {
-		fmt.Print(message)
 	}
+
+	LogMessage(fmt.Sprintf("start at %v\n", GetTime()))
 	fileURL, err := url.Parse(link)
 	if err != nil {
 		log.Fatal(err)
@@ -58,22 +56,11 @@ func Download_file(link string) {
 	// Put content on file
 	resp, err := client.Get(link)
 	if resp.StatusCode != 200 {
-		message = fmt.Sprintf("status %v", resp.Status)
-		if Down.Bflag {
-			logToFile(message)
-		} else {
-			fmt.Print(message)
-		}
+		LogMessage(fmt.Sprintf("status %v", resp.Status))
 		os.Exit(1)
 	}
 
-	message = fmt.Sprintf("sending request, awaiting response ... status %v\n", resp.Status)
-	if Down.Bflag {
-		logToFile(message)
-	} else {
-		fmt.Print(message)
-	}
-
+	LogMessage(fmt.Sprintf("sending request, awaiting response ... status %v\n", resp.Status))
 	if resp.ContentLength != -1 { // -1 indicates Content-Length is unknown or not present
 		message = fmt.Sprintf("Content size: %d [~%s]\n", resp.ContentLength, BytesToMB(resp.ContentLength))
 	} else {
@@ -84,20 +71,9 @@ func Download_file(link string) {
 	if err != nil {
 		log.Fatal(err)
 	}
+	LogMessage(message)
 
-	if Down.Bflag {
-		logToFile(message)
-	} else {
-		fmt.Print(message)
-	}
-
-	message = fmt.Sprintf("saving file to: ./%v\n", fileName)
-	if Down.Bflag {
-		logToFile(message)
-	} else {
-		fmt.Print(message)
-	}
-
+	LogMessage(fmt.Sprintf("saving file to: ./%v\n", fileName))
 	defer resp.Body.Close()
 	// if background is not passed
 	if !Down.Bflag {
@@ -128,12 +104,7 @@ func Download_file(link string) {
 		io.Copy(file, resp.Body)
 		defer file.Close()
 	}
-	message = fmt.Sprintf("Downloaded [%v]\nfinished at %v\n", link, GetTime())
-	if Down.Bflag {
-		logToFile(message)
-	} else {
-		fmt.Print(message)
-	}
+	LogMessage(fmt.Sprintf("Downloaded [%v]\nfinished at %v\n", link, GetTime()))
 }
 
 // BytesToKB converts bytes to kilobytes (KiB = 1024 bytes) and rounds to 2 decimals
@@ -155,4 +126,11 @@ func GetTime() string {
 
 	// return the formatted time
 	return formattedTime
+}
+func LogMessage(message string) {
+	if Down.Bflag {
+		logToFile(message)
+	} else {
+		fmt.Print(message)
+	}
 }
