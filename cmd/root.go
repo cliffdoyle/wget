@@ -35,8 +35,6 @@ var rootCmd = &cobra.Command{
 		// else just pars the normal flags
 		if Mirror.Mirror {
 			fmt.Println("the mirror flag has been passed")
-		} else if Down.Bflag {
-			fmt.Println("the b flag has been passed ")
 		} else {
 			if len(args) == 0 {
 				fmt.Fprintf(os.Stderr, "no arguments were provided\n")
