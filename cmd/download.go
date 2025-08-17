@@ -18,8 +18,16 @@ func Download_file(link string) {
 	if strings.Trim(link, " ") == "" {
 		log.Fatal("no link provided")
 	}
+	var message string
 
-	fmt.Printf("start at %v\n", GetTime())
+	//check for b flag to decide where the output goes
+	message = fmt.Sprintf("start at %v\n", GetTime())
+	if Down.Bflag {
+		fmt.Println("Output will be written to \"wget-log\".")
+		logToFile(message)
+	} else {
+		fmt.Print(message)
+	}
 	fileURL, err := url.Parse(link)
 	if err != nil {
 		log.Fatal(err)
@@ -51,45 +59,82 @@ func Download_file(link string) {
 	// Put content on file
 	resp, err := client.Get(link)
 	if resp.StatusCode != 200 {
-		fmt.Printf("status %v", resp.Status)
+		message = fmt.Sprintf("status %v", resp.Status)
+		if Down.Bflag {
+			logToFile(message)
+		} else {
+			fmt.Print(message)
+		}
 		os.Exit(1)
 	}
 
-	fmt.Printf("status %v\n", resp.Status)
-	if resp.ContentLength != -1 { // -1 indicates Content-Length is unknown or not present
-		fmt.Printf("Content size: %d [~%s]\n", resp.ContentLength, BytesToMB(resp.ContentLength))
+	message = fmt.Sprintf("sending request, awaiting response ... status %v\n", resp.Status)
+	if Down.Bflag {
+		logToFile(message)
 	} else {
-		fmt.Println("Content-Length header not available or unknown.")
+		fmt.Print(message)
 	}
+
+	if resp.ContentLength != -1 { // -1 indicates Content-Length is unknown or not present
+		message = fmt.Sprintf("Content size: %d [~%s]\n", resp.ContentLength, BytesToMB(resp.ContentLength))
+	} else {
+		message = "Content-Length header not available or unknown.\n"
+	}
+
+	//err check for resp
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	fmt.Printf("saving file to: ./%v\n", fileName)
-	defer resp.Body.Close()
+	if Down.Bflag {
+		logToFile(message)
+	} else {
+		fmt.Print(message)
+	}
 
-	bar := progressbar.NewOptions64(
-		resp.ContentLength,
-		progressbar.OptionSetDescription("downloading"),
-		progressbar.OptionShowBytes(true),
-		progressbar.OptionSetWidth(35),
-		progressbar.OptionShowCount(),
-		progressbar.OptionSetElapsedTime(true), // time
-		progressbar.OptionSetPredictTime(true), // ETA
-		progressbar.OptionOnCompletion(func() {
-			fmt.Printf("\n\nDownloaded [%v]\nfinished at %v\n", link, GetTime())
-		}),
-		progressbar.OptionSetTheme(progressbar.Theme{
-			Saucer:        "=",
-			SaucerHead:    ">",
-			SaucerPadding: " ",
-			BarStart:      "[",
-			BarEnd:        "]",
-		}),
-	)
-	io.Copy(io.MultiWriter(file, bar), resp.Body)
-	defer bar.Clear()
-	defer file.Close()
+	message = fmt.Sprintf("saving file to: ./%v\n", fileName)
+	if Down.Bflag {
+		logToFile(message)
+	} else {
+		fmt.Print(message)
+	}
+
+	defer resp.Body.Close()
+	// if background is not passed
+	if !Down.Bflag {
+		bar := progressbar.NewOptions64(
+			resp.ContentLength,
+			progressbar.OptionSetDescription("downloading"),
+			progressbar.OptionShowBytes(true),
+			progressbar.OptionSetWidth(35),
+			progressbar.OptionShowCount(),
+			progressbar.OptionSetElapsedTime(true), // time
+			progressbar.OptionSetPredictTime(true), // ETA
+			progressbar.OptionOnCompletion(func() {
+				fmt.Println()
+			}),
+			progressbar.OptionSetTheme(progressbar.Theme{
+				Saucer:        "=",
+				SaucerHead:    ">",
+				SaucerPadding: " ",
+				BarStart:      "[",
+				BarEnd:        "]",
+			}),
+		)
+		io.Copy(io.MultiWriter(file, bar), resp.Body)
+
+		defer bar.Clear()
+		defer file.Close()
+	} else {
+		io.Copy(file, resp.Body)
+		defer file.Close()
+	}
+	message = fmt.Sprintf("Downloaded [%v]\nfinished at %v\n", link, GetTime())
+	if Down.Bflag {
+		logToFile(message)
+	} else {
+		fmt.Print(message)
+	}
 }
 
 // BytesToKB converts bytes to kilobytes (KiB = 1024 bytes) and rounds to 2 decimals
