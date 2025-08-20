@@ -86,7 +86,7 @@ func Download_file(link string) {
 			progressbar.OptionSetElapsedTime(true), // time
 			progressbar.OptionSetPredictTime(true), // ETA
 			progressbar.OptionOnCompletion(func() {
-				fmt.Println()
+				fmt.Print("\n\n")
 			}),
 			progressbar.OptionSetTheme(progressbar.Theme{
 				Saucer:        "=",
