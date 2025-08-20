@@ -19,6 +19,6 @@ func logToFile(message string) {
 	defer file.Close()
 
 	// Create a logger that writes to the file
-	logger := log.New(file, "", log.LstdFlags)
-	logger.Println(message)
+	logger := log.New(file, "", 0)
+	logger.Print(message)
 }
