@@ -63,16 +63,16 @@ func Download_file(link string) {
 
 	if resp.StatusCode != 200 {
 		LogMessage(fmt.Sprintf("status %v", resp.Status))
-		os.Exit(1)
+		return
 	}
 
 	defer resp.Body.Close()
 
 	LogMessage(fmt.Sprintf("sending request, awaiting response ... status %v\n", resp.Status))
-	if resp.ContentLength != -1 { // -1 indicates Content-Length is unknown or not present
-		message = fmt.Sprintf("Content size: %d [~%s]\n", resp.ContentLength, BytesToMB(resp.ContentLength))
-	} else {
+	if resp.ContentLength != 0 {
 		message = "Content-Length header not available or unknown.\n"
+	} else {
+		message = fmt.Sprintf("Content size: %d [~%s]\n", resp.ContentLength, BytesToMB(resp.ContentLength))
 	}
 
 	LogMessage(message)
