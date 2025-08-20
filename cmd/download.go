@@ -56,10 +56,17 @@ func Download_file(link string) {
 	}
 	// Put content on file
 	resp, err := client.Get(link)
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	if resp.StatusCode != 200 {
 		LogMessage(fmt.Sprintf("status %v", resp.Status))
 		os.Exit(1)
 	}
+
+	defer resp.Body.Close()
 
 	LogMessage(fmt.Sprintf("sending request, awaiting response ... status %v\n", resp.Status))
 	if resp.ContentLength != -1 { // -1 indicates Content-Length is unknown or not present
@@ -68,10 +75,6 @@ func Download_file(link string) {
 		message = "Content-Length header not available or unknown.\n"
 	}
 
-	//err check for resp
-	if err != nil {
-		log.Fatal(err)
-	}
 	LogMessage(message)
 
 	LogMessage(fmt.Sprintf("saving file to: ./%v\n", fileName))
