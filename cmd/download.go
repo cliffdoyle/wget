@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -9,77 +11,116 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/schollz/progressbar/v3"
 )
 
+type ThreadSafeProgressWriter struct {
+	bar    *progressbar.ProgressBar
+	mu     sync.Mutex
+	writer io.Writer
+}
+
+func NewThreadSafeProgressWriter(bar *progressbar.ProgressBar) *ThreadSafeProgressWriter {
+	return &ThreadSafeProgressWriter{
+		bar:    bar,
+		writer: io.MultiWriter(bar),
+	}
+}
+
+func (tpw *ThreadSafeProgressWriter) Write(p []byte) (int, error) {
+	tpw.mu.Lock()
+	defer tpw.mu.Unlock()
+
+	n, err := tpw.writer.Write(p)
+	if err != nil {
+		return n, err
+	}
+
+	tpw.bar.Add(len(p))
+	return n, nil
+}
+
 func Download_file(link string) {
 	if strings.Trim(link, " ") == "" {
 		log.Fatal("no link provided")
 	}
-	var message string
 
-	//check for b flag to decide where the output goes
+	var message string
 	if Down.Bflag {
 		fmt.Println("Output will be written to \"wget-log\".")
 	}
 
 	LogMessage(fmt.Sprintf("start at %v\n", GetTime()))
+
 	fileURL, err := url.Parse(link)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("Invalid URL: ", err)
 	}
+
 	path := fileURL.Path
 	segments := strings.Split(path, "/")
 	fileName := segments[len(segments)-1]
-	// if the flag flag is provided we change it to the provided flag
+
 	if strings.TrimSpace(Down.Oflag) != "" {
 		fileName = Down.Oflag
 	}
 
-	//check if a filepath has been passed with the p flag
 	if strings.TrimSpace(Down.Pflag) != "" {
 		fileName = filepath.Join(Down.Pflag, fileName)
 	}
-	// Create blank file
+
 	file, err := os.Create(fileName)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("Cannot create file: ", err)
 	}
 	defer file.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", link, nil)
+	if err != nil {
+		log.Fatal("Failed to create request: ", err)
+	}
+
 	client := http.Client{
 		CheckRedirect: func(r *http.Request, via []*http.Request) error {
 			r.URL.Opaque = r.URL.Path
 			return nil
 		},
+		Transport: &http.Transport{
+			ResponseHeaderTimeout: 10 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+		},
 	}
-	// Put content on file
-	resp, err := client.Get(link)
 
+	resp, err := client.Do(req)
 	if err != nil {
-		log.Fatal(err)
+		if errors.Is(err, context.DeadlineExceeded) {
+			log.Fatal("Download timed out after 30 seconds")
+		}
+		log.Fatal("Download failed: ", err)
 	}
+	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
 		LogMessage(fmt.Sprintf("status %v", resp.Status))
-		return
+		os.Exit(1)
 	}
-
-	defer resp.Body.Close()
 
 	LogMessage(fmt.Sprintf("sending request, awaiting response ... status %v\n", resp.Status))
-	if resp.ContentLength != 0 {
-		message = "Content-Length header not available or unknown.\n"
-	} else {
+
+	if resp.ContentLength != -1 {
 		message = fmt.Sprintf("Content size: %d [~%s]\n", resp.ContentLength, BytesToMB(resp.ContentLength))
+	} else {
+		message = "Content-Length header not available or unknown.\n"
 	}
-
 	LogMessage(message)
-
 	LogMessage(fmt.Sprintf("saving file to: ./%v\n", fileName))
-	defer resp.Body.Close()
-	// if background is not passed
+
 	if !Down.Bflag {
 		bar := progressbar.NewOptions64(
 			resp.ContentLength,
@@ -87,8 +128,8 @@ func Download_file(link string) {
 			progressbar.OptionShowBytes(true),
 			progressbar.OptionSetWidth(35),
 			progressbar.OptionShowCount(),
-			progressbar.OptionSetElapsedTime(true), // time
-			progressbar.OptionSetPredictTime(true), // ETA
+			progressbar.OptionSetElapsedTime(true),
+			progressbar.OptionSetPredictTime(true),
 			progressbar.OptionOnCompletion(func() {
 				fmt.Print("\n\n")
 			}),
@@ -100,14 +141,17 @@ func Download_file(link string) {
 				BarEnd:        "]",
 			}),
 		)
-		io.Copy(io.MultiWriter(file, bar), resp.Body)
 
-		defer bar.Clear()
-		defer file.Close()
+		safeWriter := NewThreadSafeProgressWriter(bar)
+		_, err = io.Copy(io.MultiWriter(file, safeWriter), resp.Body)
 	} else {
-		io.Copy(file, resp.Body)
-		defer file.Close()
+		_, err = io.Copy(file, resp.Body)
 	}
+
+	if err != nil {
+		log.Fatal("Download failed: ", err)
+	}
+
 	LogMessage(fmt.Sprintf("Downloaded [%v]\nfinished at %v\n", link, GetTime()))
 }
 
