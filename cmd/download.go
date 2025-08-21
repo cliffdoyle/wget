@@ -53,7 +53,18 @@ func Download_file(link string) {
 		fmt.Println("Output will be written to \"wget-log\".")
 	}
 
-	LogMessage(fmt.Sprintf("start at %v\n", GetTime()))
+	startTime := GetTime()
+	LogMessage(fmt.Sprintf("start at %v\n", startTime))
+
+	var rateLimit int64
+	var err error
+	if Down.RateLimit != "" {
+		rateLimit, err = ParseRateLimit(Down.RateLimit)
+		if err != nil {
+			log.Fatal("Invalid rate limit: ", err)
+		}
+		LogMessage(fmt.Sprintf("Rate limit set to: %s\n", GetRateLimitDisplay(rateLimit)))
+	}
 
 	fileURL, err := url.Parse(link)
 	if err != nil {
@@ -78,7 +89,7 @@ func Download_file(link string) {
 	}
 	defer file.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, "GET", link, nil)
@@ -100,26 +111,32 @@ func Download_file(link string) {
 	resp, err := client.Do(req)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
-			log.Fatal("Download timed out after 30 seconds")
+			log.Fatal("Request timed out")
 		}
 		log.Fatal("Download failed: ", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		LogMessage(fmt.Sprintf("status %v", resp.Status))
+		LogMessage(fmt.Sprintf("status %v\n", resp.Status))
 		os.Exit(1)
 	}
 
-	LogMessage(fmt.Sprintf("sending request, awaiting response ... status %v\n", resp.Status))
+	LogMessage(fmt.Sprintf("sending request, awaiting response... status %v\n", resp.Status))
 
 	if resp.ContentLength != -1 {
-		message = fmt.Sprintf("Content size: %d [~%s]\n", resp.ContentLength, BytesToMB(resp.ContentLength))
+		message = fmt.Sprintf("content size: %d [~%s]\n", resp.ContentLength, BytesToMB(resp.ContentLength))
 	} else {
 		message = "Content-Length header not available or unknown.\n"
 	}
 	LogMessage(message)
-	LogMessage(fmt.Sprintf("saving file to: ./%v\n", fileName))
+	LogMessage(fmt.Sprintf("saving file to: ./%s\n", fileName))
+
+	var writer io.Writer = file
+
+	if rateLimit > 0 {
+		writer = NewSimpleRateLimitedWriter(file, rateLimit)
+	}
 
 	if !Down.Bflag {
 		bar := progressbar.NewOptions64(
@@ -128,11 +145,13 @@ func Download_file(link string) {
 			progressbar.OptionShowBytes(true),
 			progressbar.OptionSetWidth(35),
 			progressbar.OptionShowCount(),
-			progressbar.OptionSetElapsedTime(true),
-			progressbar.OptionSetPredictTime(true),
+			progressbar.OptionSetElapsedTime(false),
+			progressbar.OptionSetPredictTime(false),
 			progressbar.OptionOnCompletion(func() {
-				fmt.Print("\n\n")
+				fmt.Print("\n")
 			}),
+			progressbar.OptionFullWidth(),
+			progressbar.OptionSetRenderBlankState(true),
 			progressbar.OptionSetTheme(progressbar.Theme{
 				Saucer:        "=",
 				SaucerHead:    ">",
@@ -142,17 +161,25 @@ func Download_file(link string) {
 			}),
 		)
 
-		safeWriter := NewThreadSafeProgressWriter(bar)
-		_, err = io.Copy(io.MultiWriter(file, safeWriter), resp.Body)
+		multiWriter := io.MultiWriter(writer, bar)
+
+		_, err = io.Copy(multiWriter, resp.Body)
+		if err != nil {
+			log.Fatal("Download failed: ", err)
+		}
+
+		bar.Finish()
+		fmt.Println()
+
 	} else {
-		_, err = io.Copy(file, resp.Body)
+		_, err = io.Copy(writer, resp.Body)
+		if err != nil {
+			log.Fatal("Download failed: ", err)
+		}
 	}
 
-	if err != nil {
-		log.Fatal("Download failed: ", err)
-	}
-
-	LogMessage(fmt.Sprintf("Downloaded [%v]\nfinished at %v\n", link, GetTime()))
+	LogMessage(fmt.Sprintf("Downloaded [%v]\n", link))
+	LogMessage(fmt.Sprintf("finished at %v\n", GetTime()))
 }
 
 // BytesToKB converts bytes to kilobytes (KiB = 1024 bytes) and rounds to 2 decimals
