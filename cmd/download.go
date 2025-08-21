@@ -209,3 +209,14 @@ func LogMessage(message string) {
 		fmt.Print(message)
 	}
 }
+
+func logToFileConcurrent(message string) {
+	file, err := os.OpenFile("wget-log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0666)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+
+	logger := log.New(file, "", 0)
+	logger.Print(message)
+}

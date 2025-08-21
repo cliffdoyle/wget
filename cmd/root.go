@@ -30,11 +30,10 @@ var rootCmd = &cobra.Command{
 	Long: `this is wget, a free utility for non-interactive download of files from the Web.
 	It supports HTTP, HTTPS, and FTP protocols, as well as retrieval through HTTP proxies ans website mirroring`,
 	Run: func(cmd *cobra.Command, args []string) {
-		// the are two main tasks, the mirror part and the normal part
-		// we check if mirror flag has been passed then pass the logic to another function
-		// else just pars the normal flags
 		if Mirror.Mirror {
 			fmt.Println("the mirror flag has been passed")
+		} else if Down.Iflag != "" {
+			DownloadConcurrently(Down.Iflag)
 		} else {
 			if len(args) == 0 {
 				fmt.Fprintf(os.Stderr, "no arguments were provided\n")
@@ -42,7 +41,6 @@ var rootCmd = &cobra.Command{
 			}
 			Download_file(args[0])
 		}
-
 	},
 }
 
