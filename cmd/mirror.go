@@ -335,7 +335,8 @@ func (ctx *MirrorContext) isExcludedDirectory(urlStr string) bool {
 	}
 
 	for _, excludedDir := range ctx.ExcludeDirs {
-		if strings.HasPrefix(parsedURL.Path, excludedDir) {
+		excludedDir = strings.Trim(excludedDir, "/")
+		if excludedDir != "" && strings.HasPrefix(strings.Trim(parsedURL.Path, "/"), excludedDir) {
 			return true
 		}
 	}
