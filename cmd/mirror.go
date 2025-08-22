@@ -321,7 +321,12 @@ func (ctx *MirrorContext) isSameDomain(urlStr string) bool {
 	if err != nil {
 		return false
 	}
-	return parsedURL.Host == ctx.BaseURL.Host
+
+	// Remove www. prefix for comparison
+	baseHost := strings.TrimPrefix(ctx.BaseURL.Host, "www.")
+	targetHost := strings.TrimPrefix(parsedURL.Host, "www.")
+
+	return baseHost == targetHost
 }
 
 // isExcludedDirectory checks if URL path matches excluded directories
