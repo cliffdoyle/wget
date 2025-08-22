@@ -106,11 +106,13 @@ func InitMirroring(startURL string) error {
 		go ctx.mirrorWorker(i + 1)
 	}
 
-	ctx.DownloadQueue <- MirrorDownloadTask{
-		URL:    startURL,
-		Depth:  0,
-		IsPage: true,
-	}
+	go func() {
+		ctx.DownloadQueue <- MirrorDownloadTask{
+			URL:    startURL,
+			Depth:  0,
+			IsPage: true,
+		}
+	}()
 
 	close(ctx.DownloadQueue)
 	ctx.WaitGroup.Wait()
