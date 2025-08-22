@@ -100,8 +100,8 @@ func InitMirroring(startURL string) error {
 		fmt.Println("Converting links for offline viewing")
 	}
 
-	numWorkers := 10
-	for i := 0; i < numWorkers; i++ {
+	numWorkers := 5
+	for i := range numWorkers {
 		ctx.WaitGroup.Add(1)
 		go ctx.mirrorWorker(i + 1)
 	}
