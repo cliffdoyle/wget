@@ -56,6 +56,7 @@ func InitMirroring(startURL string) error {
 			if !strings.HasPrefix(ext, ".") {
 				rejectList[i] = "." + ext
 			}
+			rejectList[i] = strings.ToLower(rejectList[i])
 		}
 	}
 
