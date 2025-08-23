@@ -7,14 +7,15 @@ import (
 	"github.com/spf13/cobra"
 )
 
-type Mirror_flag struct {
-	Mirror  bool
-	Reject  string
-	Exclude string
-	Convert string
+type MirrorFlags struct {
+	Mirror       bool
+	Reject       string
+	Exclude      string
+	ConvertLinks bool
+	Depth        int
 }
 
-type Download_flag struct {
+type DownloadFlags struct {
 	Bflag     bool
 	Oflag     string
 	Pflag     string
@@ -22,43 +23,53 @@ type Download_flag struct {
 	Iflag     string
 }
 
-var Mirror Mirror_flag
-var Down Download_flag
+var MirrorFlagsConfig MirrorFlags
+var Down DownloadFlags
+
 var rootCmd = &cobra.Command{
 	Use:   "wget",
 	Short: "this is a basic wget clone made with go",
 	Long: `this is wget, a free utility for non-interactive download of files from the Web.
 	It supports HTTP, HTTPS, and FTP protocols, as well as retrieval through HTTP proxies ans website mirroring`,
 	Run: func(cmd *cobra.Command, args []string) {
-		if Mirror.Mirror {
-			fmt.Println("the mirror flag has been passed")
+		if MirrorFlagsConfig.Mirror {
+			if len(args) == 0 {
+				fmt.Fprintf(os.Stderr, "Error: No URL provided for mirroring\n")
+				os.Exit(1)
+			}
+			if err := InitMirroring(args[0]); err != nil {
+				fmt.Fprintf(os.Stderr, "Mirroring failed: %v\n", err)
+				os.Exit(1)
+			}
 		} else if Down.Iflag != "" {
 			DownloadConcurrently(Down.Iflag)
 		} else {
 			if len(args) == 0 {
-				fmt.Fprintf(os.Stderr, "no arguments were provided\n")
+				fmt.Fprintf(os.Stderr, "Error: No URL provided\n")
 				os.Exit(1)
 			}
-			Download_file(args[0])
+			DownloadFile(args[0])
 		}
 	},
 }
 
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintf(os.Stderr, "Oops. An error while executing Wget '%s'\n", err)
+		fmt.Fprintf(os.Stderr, "Error executing command: %v\n", err)
 		os.Exit(1)
 	}
 }
+
 func init() {
-	// Normal flags (only for this command)
-	rootCmd.Flags().BoolVarP(&Down.Bflag, "Background", "B", false, "Option for background download and logging")
-	rootCmd.Flags().StringVarP(&Down.Oflag, "Output-document", "O", "", "Option for changing filename")
-	rootCmd.Flags().StringVarP(&Down.Pflag, "directory-prefix", "P", "", "Option for saving a file to a specific directory")
-	rootCmd.Flags().StringVarP(&Down.RateLimit, "rate-limit", "L", "", "limit your donwload speed(e.g., 200k, 2M)")
-	rootCmd.Flags().StringVarP(&Down.Iflag, "input-file", "i", "", "download from links in a txt file(concurrently)")
-	rootCmd.Flags().BoolVarP(&Mirror.Mirror, "mirror", "m", false, "mirror a webpage from link")
-	rootCmd.Flags().StringVarP(&Mirror.Reject, "reject", "R", "", "list of file suffixes that the program will avoid downloading during the retrieval")
-	rootCmd.Flags().StringVarP(&Mirror.Exclude, "exclude", "X", "", "Option for background download and logging")
-	rootCmd.Flags().StringVarP(&Mirror.Convert, "convert-links", "c", "", "convert links in the downloaded files to be viewed offline, changing them to point to the locally downloaded resources")
+	rootCmd.Flags().BoolVarP(&Down.Bflag, "background", "B", false, "Download in background mode")
+	rootCmd.Flags().StringVarP(&Down.Oflag, "output-document", "O", "", "Write output to specified file")
+	rootCmd.Flags().StringVarP(&Down.Pflag, "directory-prefix", "P", "", "Save files to specified directory")
+	rootCmd.Flags().StringVarP(&Down.RateLimit, "rate-limit", "L", "", "Limit download rate (e.g., 200k, 2M)")
+	rootCmd.Flags().StringVarP(&Down.Iflag, "input-file", "i", "", "Download URLs from input file")
+
+	rootCmd.Flags().BoolVarP(&MirrorFlagsConfig.Mirror, "mirror", "m", false, "Mirror an entire website")
+	rootCmd.Flags().StringVarP(&MirrorFlagsConfig.Reject, "reject", "R", "", "Comma-separated list of file extensions to reject")
+	rootCmd.Flags().StringVarP(&MirrorFlagsConfig.Exclude, "exclude-directories", "X", "", "Comma-separated list of directories to exclude")
+	rootCmd.Flags().BoolVarP(&MirrorFlagsConfig.ConvertLinks, "convert-links", "k", false, "Convert links for offline viewing")
+	rootCmd.Flags().IntVarP(&MirrorFlagsConfig.Depth, "level", "l", 5, "Maximum recursion depth")
 }
