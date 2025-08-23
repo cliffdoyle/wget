@@ -15,7 +15,6 @@ import (
 	"golang.org/x/net/html"
 )
 
-// MirrorContext holds the state for website mirroring
 type MirrorContext struct {
 	BaseURL       *url.URL
 	OutputDir     string
@@ -27,16 +26,14 @@ type MirrorContext struct {
 	DownloadQueue chan MirrorDownloadTask
 	WaitGroup     sync.WaitGroup
 	Client        *http.Client
+	mu            sync.Mutex
 }
 
-// DownloadTask represents a mirroring download task
 type MirrorDownloadTask struct {
-	URL    string
-	Depth  int
-	IsPage bool
+	URL   string
+	Depth int
 }
 
-// InitMirroring initializes the mirroring process
 func InitMirroring(startURL string) error {
 	parsedURL, err := url.Parse(startURL)
 	if err != nil {
@@ -52,11 +49,13 @@ func InitMirroring(startURL string) error {
 	if MirrorFlagsConfig.Reject != "" {
 		rejectList = strings.Split(MirrorFlagsConfig.Reject, ",")
 		for i, ext := range rejectList {
-			rejectList[i] = strings.TrimSpace(ext)
-			if !strings.HasPrefix(ext, ".") {
-				rejectList[i] = "." + ext
+			ext = strings.TrimSpace(ext)
+			if ext != "" {
+				if !strings.HasPrefix(ext, ".") {
+					ext = "." + ext
+				}
+				rejectList[i] = strings.ToLower(ext)
 			}
-			rejectList[i] = strings.ToLower(rejectList[i])
 		}
 	}
 
@@ -64,7 +63,11 @@ func InitMirroring(startURL string) error {
 	if MirrorFlagsConfig.Exclude != "" {
 		excludeDirs = strings.Split(MirrorFlagsConfig.Exclude, ",")
 		for i, dir := range excludeDirs {
-			excludeDirs[i] = strings.TrimSpace(dir)
+			dir = strings.TrimSpace(dir)
+			dir = strings.Trim(dir, "/")
+			if dir != "" {
+				excludeDirs[i] = dir
+			}
 		}
 	}
 
@@ -75,11 +78,11 @@ func InitMirroring(startURL string) error {
 		ExcludeDirs:   excludeDirs,
 		ConvertLinks:  MirrorFlagsConfig.ConvertLinks,
 		MaxDepth:      MirrorFlagsConfig.Depth,
-		DownloadQueue: make(chan MirrorDownloadTask, 1000),
+		DownloadQueue: make(chan MirrorDownloadTask, 100),
 		Client: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
-				MaxIdleConns:        100,
+				MaxIdleConns:        10,
 				MaxIdleConnsPerHost: 10,
 				IdleConnTimeout:     30 * time.Second,
 			},
@@ -99,6 +102,7 @@ func InitMirroring(startURL string) error {
 	if ctx.ConvertLinks {
 		fmt.Println("Converting links for offline viewing")
 	}
+	fmt.Println()
 
 	numWorkers := 5
 	for i := range numWorkers {
@@ -106,58 +110,87 @@ func InitMirroring(startURL string) error {
 		go ctx.mirrorWorker(i + 1)
 	}
 
+	ctx.DownloadQueue <- MirrorDownloadTask{
+		URL:   startURL,
+		Depth: 0,
+	}
+
 	go func() {
-		ctx.DownloadQueue <- MirrorDownloadTask{
-			URL:    startURL,
-			Depth:  0,
-			IsPage: true,
-		}
+		ctx.WaitGroup.Wait()
+		close(ctx.DownloadQueue)
 	}()
-
-	close(ctx.DownloadQueue)
-	ctx.WaitGroup.Wait()
-
-	fmt.Printf("\nMirroring completed! Saved to %s/\n", outputDir)
-	return nil
-}
-
-// mirrorWorker processes mirroring download tasks
-func (ctx *MirrorContext) mirrorWorker(workerID int) {
-	defer ctx.WaitGroup.Done()
 
 	for task := range ctx.DownloadQueue {
 		if task.Depth > ctx.MaxDepth {
 			continue
 		}
+
 		if _, visited := ctx.VisitedURLs.Load(task.URL); visited {
 			continue
 		}
 		ctx.VisitedURLs.Store(task.URL, true)
 
-		fmt.Printf("[Worker %d] Depth %d: %s\n", workerID, task.Depth, task.URL)
-
-		filePath, err := ctx.downloadResource(task.URL, task.IsPage)
+		filePath, err := ctx.downloadResource(task.URL)
 		if err != nil {
 			log.Printf("Failed to download %s: %v", task.URL, err)
 			continue
 		}
 
-		if task.IsPage && strings.HasSuffix(filePath, ".html") {
+		if ctx.isHTMLFile(task.URL) || strings.HasSuffix(filePath, ".html") {
 			ctx.parseHTMLForLinks(filePath, task.URL, task.Depth+1)
 		}
 	}
+
+	fmt.Printf("\nMirroring completed! Saved to %s/\n", outputDir)
+	return nil
 }
 
-// downloadResource downloads a single resource for mirroring
-func (ctx *MirrorContext) downloadResource(urlStr string, isPage bool) (string, error) {
+func (ctx *MirrorContext) mirrorWorker(workerID int) {
+	defer ctx.WaitGroup.Done()
+
+	for task := range ctx.DownloadQueue {
+		ctx.processDownloadTask(task, workerID)
+	}
+}
+
+func (ctx *MirrorContext) processDownloadTask(task MirrorDownloadTask, workerID int) {
+	if task.Depth > ctx.MaxDepth {
+		return
+	}
+
+	if _, visited := ctx.VisitedURLs.Load(task.URL); visited {
+		return
+	}
+	ctx.VisitedURLs.Store(task.URL, true)
+
+	fmt.Printf("[Worker %d] Depth %d: %s\n", workerID, task.Depth, task.URL)
+
+	filePath, err := ctx.downloadResource(task.URL)
+	if err != nil {
+		log.Printf("Failed to download %s: %v", task.URL, err)
+		return
+	}
+
+	if ctx.isHTMLFile(task.URL) || strings.HasSuffix(filePath, ".html") {
+		ctx.parseHTMLForLinks(filePath, task.URL, task.Depth+1)
+	}
+}
+
+func (ctx *MirrorContext) downloadResource(urlStr string) (string, error) {
 	if ctx.shouldReject(urlStr) {
 		return "", fmt.Errorf("rejected by extension filter")
 	}
+
+	if ctx.isExcludedDirectory(urlStr) {
+		return "", fmt.Errorf("rejected by directory filter")
+	}
+
 	req, err := http.NewRequest("GET", urlStr, nil)
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("User-Agent", "Wget/1.0")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 
 	resp, err := ctx.Client.Do(req)
 	if err != nil {
@@ -166,10 +199,13 @@ func (ctx *MirrorContext) downloadResource(urlStr string, isPage bool) (string, 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
+		return "", fmt.Errorf("HTTP %d %s", resp.StatusCode, resp.Status)
 	}
 
-	filePath, err := ctx.getLocalPath(urlStr, isPage)
+	contentType := resp.Header.Get("Content-Type")
+	isHTML := strings.Contains(contentType, "text/html") || ctx.isHTMLFile(urlStr)
+
+	filePath, err := ctx.getLocalPath(urlStr, isHTML)
 	if err != nil {
 		return "", err
 	}
@@ -188,10 +224,48 @@ func (ctx *MirrorContext) downloadResource(urlStr string, isPage bool) (string, 
 		return "", err
 	}
 
+	if isHTML && ctx.ConvertLinks {
+		if err := ctx.convertLinksInHTML(filePath); err != nil {
+			log.Printf("Link conversion failed for %s: %v", filePath, err)
+		}
+	}
+
 	return filePath, nil
 }
 
-// shouldReject checks if a URL should be rejected based on extension
+func (ctx *MirrorContext) getLocalPath(urlStr string, isHTML bool) (string, error) {
+	parsedURL, err := url.Parse(urlStr)
+	if err != nil {
+		return "", err
+	}
+
+	path := parsedURL.Path
+	if path == "" {
+		path = "/index.html"
+	} else if strings.HasSuffix(path, "/") {
+		path += "index.html"
+	} else if isHTML && !strings.Contains(path, ".") {
+		path += ".html"
+	}
+
+	localPath := filepath.Join(ctx.OutputDir, path)
+	localPath = filepath.Clean(localPath)
+
+	return localPath, nil
+}
+
+func (ctx *MirrorContext) isHTMLFile(urlStr string) bool {
+	parsedURL, err := url.Parse(urlStr)
+	if err != nil {
+		return false
+	}
+
+	path := parsedURL.Path
+	return path == "" || strings.HasSuffix(path, "/") ||
+		strings.HasSuffix(path, ".html") || strings.HasSuffix(path, ".htm") ||
+		!strings.Contains(path, ".")
+}
+
 func (ctx *MirrorContext) shouldReject(urlStr string) bool {
 	if len(ctx.RejectList) == 0 {
 		return false
@@ -204,7 +278,7 @@ func (ctx *MirrorContext) shouldReject(urlStr string) bool {
 
 	ext := strings.ToLower(filepath.Ext(parsedURL.Path))
 	for _, rejectExt := range ctx.RejectList {
-		if ext == strings.ToLower(rejectExt) {
+		if ext == rejectExt {
 			return true
 		}
 	}
@@ -212,25 +286,26 @@ func (ctx *MirrorContext) shouldReject(urlStr string) bool {
 	return false
 }
 
-// getLocalPath converts a URL to a local file path
-func (ctx *MirrorContext) getLocalPath(urlStr string, isPage bool) (string, error) {
+func (ctx *MirrorContext) isExcludedDirectory(urlStr string) bool {
+	if len(ctx.ExcludeDirs) == 0 {
+		return false
+	}
+
 	parsedURL, err := url.Parse(urlStr)
 	if err != nil {
-		return "", err
+		return false
 	}
 
-	localPath := filepath.Join(ctx.OutputDir, parsedURL.Host, parsedURL.Path)
-
-	if isPage && !strings.Contains(localPath, ".") {
-		localPath = filepath.Join(localPath, "index.html")
-	} else if isPage && !strings.HasSuffix(localPath, ".html") {
-		localPath += ".html"
+	path := strings.Trim(parsedURL.Path, "/")
+	for _, excludedDir := range ctx.ExcludeDirs {
+		if strings.HasPrefix(path, excludedDir) {
+			return true
+		}
 	}
 
-	return localPath, nil
+	return false
 }
 
-// parseHTMLForLinks extracts links from HTML content
 func (ctx *MirrorContext) parseHTMLForLinks(filePath, baseURL string, depth int) {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -252,8 +327,10 @@ func (ctx *MirrorContext) parseHTMLForLinks(filePath, baseURL string, depth int)
 			switch n.Data {
 			case "a", "link":
 				linkAttr = "href"
-			case "img", "script":
+			case "img", "script", "iframe":
 				linkAttr = "src"
+			case "form":
+				linkAttr = "action"
 			}
 
 			if linkAttr != "" {
@@ -271,13 +348,10 @@ func (ctx *MirrorContext) parseHTMLForLinks(filePath, baseURL string, depth int)
 	}
 
 	extractLinks(doc)
-
-	// TODO: Implement link conversion if ctx.ConvertLinks is true
 }
 
-// processFoundLink processes a discovered link
 func (ctx *MirrorContext) processFoundLink(link, baseURL string, depth int) {
-	if link == "" || strings.HasPrefix(link, "#") {
+	if link == "" || strings.HasPrefix(link, "#") || strings.HasPrefix(link, "javascript:") {
 		return
 	}
 
@@ -290,19 +364,18 @@ func (ctx *MirrorContext) processFoundLink(link, baseURL string, depth int) {
 		return
 	}
 
-	if ctx.isExcludedDirectory(absoluteURL) {
+	if _, visited := ctx.VisitedURLs.Load(absoluteURL); visited {
 		return
 	}
 
-	isPage := strings.Contains(absoluteURL, ".html") || !strings.Contains(absoluteURL, ".")
+	ctx.mu.Lock()
 	ctx.DownloadQueue <- MirrorDownloadTask{
-		URL:    absoluteURL,
-		Depth:  depth,
-		IsPage: isPage,
+		URL:   absoluteURL,
+		Depth: depth,
 	}
+	ctx.mu.Unlock()
 }
 
-// resolveURL converts relative URL to absolute
 func (ctx *MirrorContext) resolveURL(link, baseURL string) (string, error) {
 	base, err := url.Parse(baseURL)
 	if err != nil {
@@ -317,37 +390,41 @@ func (ctx *MirrorContext) resolveURL(link, baseURL string) (string, error) {
 	return base.ResolveReference(relative).String(), nil
 }
 
-// isSameDomain checks if URL belongs to the same domain
 func (ctx *MirrorContext) isSameDomain(urlStr string) bool {
 	parsedURL, err := url.Parse(urlStr)
 	if err != nil {
 		return false
 	}
 
-	// Remove www. prefix for comparison
 	baseHost := strings.TrimPrefix(ctx.BaseURL.Host, "www.")
 	targetHost := strings.TrimPrefix(parsedURL.Host, "www.")
 
 	return baseHost == targetHost
 }
 
-// isExcludedDirectory checks if URL path matches excluded directories
-func (ctx *MirrorContext) isExcludedDirectory(urlStr string) bool {
-	if len(ctx.ExcludeDirs) == 0 {
-		return false
-	}
-
-	parsedURL, err := url.Parse(urlStr)
+func (ctx *MirrorContext) convertLinksInHTML(filePath string) error {
+	content, err := os.ReadFile(filePath)
 	if err != nil {
-		return false
+		return err
 	}
 
-	for _, excludedDir := range ctx.ExcludeDirs {
-		excludedDir = strings.Trim(excludedDir, "/")
-		if excludedDir != "" && strings.HasPrefix(strings.Trim(parsedURL.Path, "/"), excludedDir) {
-			return true
-		}
+	htmlContent := string(content)
+	baseURL := ctx.BaseURL.String()
+	baseHost := ctx.BaseURL.Host
+
+	replacements := []struct {
+		old string
+		new string
+	}{
+		{baseURL, ""},
+		{"https://" + baseHost, ""},
+		{"http://" + baseHost, ""},
+		{"//" + baseHost, ""},
 	}
 
-	return false
+	for _, r := range replacements {
+		htmlContent = strings.ReplaceAll(htmlContent, r.old, r.new)
+	}
+
+	return os.WriteFile(filePath, []byte(htmlContent), 0644)
 }
