@@ -43,7 +43,7 @@ func (tpw *ThreadSafeProgressWriter) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-func Download_file(link string) {
+func DownloadFile(link string) {
 	if strings.Trim(link, " ") == "" {
 		log.Fatal("no link provided")
 	}
