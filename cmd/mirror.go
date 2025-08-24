@@ -106,50 +106,29 @@ func InitMirroring(startURL string) error {
 
 	numWorkers := 5
 	for i := range numWorkers {
-		ctx.WaitGroup.Add(1)
 		go ctx.mirrorWorker(i + 1)
 	}
 
+	// add waitgroup to track when a task is assigned
+	ctx.WaitGroup.Add(1)
 	ctx.DownloadQueue <- MirrorDownloadTask{
 		URL:   startURL,
 		Depth: 0,
 	}
 
-	go func() {
-		ctx.WaitGroup.Wait()
-		close(ctx.DownloadQueue)
-	}()
-
-	for task := range ctx.DownloadQueue {
-		if task.Depth > ctx.MaxDepth {
-			continue
-		}
-
-		if _, visited := ctx.VisitedURLs.Load(task.URL); visited {
-			continue
-		}
-		ctx.VisitedURLs.Store(task.URL, true)
-
-		filePath, err := ctx.downloadResource(task.URL)
-		if err != nil {
-			log.Printf("Failed to download %s: %v", task.URL, err)
-			continue
-		}
-
-		if ctx.isHTMLFile(task.URL) || strings.HasSuffix(filePath, ".html") {
-			ctx.parseHTMLForLinks(filePath, task.URL, task.Depth+1)
-		}
-	}
+	// the main loop should wait and close the channel once done*
+	ctx.WaitGroup.Wait()
+	close(ctx.DownloadQueue)
 
 	fmt.Printf("\nMirroring completed! Saved to %s/\n", outputDir)
 	return nil
 }
 
 func (ctx *MirrorContext) mirrorWorker(workerID int) {
-	defer ctx.WaitGroup.Done()
-
+	//the worker should report done when finished with a task, we track when work is done
 	for task := range ctx.DownloadQueue {
 		ctx.processDownloadTask(task, workerID)
+		ctx.WaitGroup.Done()
 	}
 }
 
@@ -369,6 +348,8 @@ func (ctx *MirrorContext) processFoundLink(link, baseURL string, depth int) {
 	}
 
 	ctx.mu.Lock()
+	// add wait when a task is added, the worker should remove when done
+	ctx.WaitGroup.Add(1)
 	ctx.DownloadQueue <- MirrorDownloadTask{
 		URL:   absoluteURL,
 		Depth: depth,
