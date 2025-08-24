@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -312,11 +313,36 @@ func (ctx *MirrorContext) parseHTMLForLinks(filePath, baseURL string, depth int)
 				linkAttr = "action"
 			}
 
-			if linkAttr != "" {
-				for _, attr := range n.Attr {
-					if attr.Key == linkAttr {
-						ctx.processFoundLink(attr.Val, baseURL, depth)
+			for _, attr := range n.Attr {
+				// main link attribute
+				if linkAttr != "" && attr.Key == linkAttr {
+					ctx.processFoundLink(attr.Val, baseURL, depth)
+				}
+
+				//this part handles tags with the style attribute
+				if attr.Key == "style" {
+					re := regexp.MustCompile(`url\(([^)]+)\)`)
+					matches := re.FindAllStringSubmatch(attr.Val, -1)
+					for _, m := range matches {
+						rawUrl := strings.Trim(m[1], `"'`)
+						ctx.processFoundLink(rawUrl, baseURL, depth)
 					}
+				}
+			}
+
+			//this part handles links inside the textcontent of the style div
+			if n.Data == "style" {
+				var cssContent string
+				for c := n.FirstChild; c != nil; c = c.NextSibling {
+					if c.Type == html.TextNode {
+						cssContent += c.Data
+					}
+				}
+				re := regexp.MustCompile(`url\(([^)]+)\)`)
+				matches := re.FindAllStringSubmatch(cssContent, -1)
+				for _, m := range matches {
+					rawUrl := strings.Trim(m[1], `"'`)
+					ctx.processFoundLink(rawUrl, baseURL, depth)
 				}
 			}
 		}
