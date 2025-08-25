@@ -32,6 +32,7 @@ type MirrorContext struct {
 	activeWorkers int
 	maxWorkers    int
 	stats         *MirrorStats
+	baseURL       *url.URL
 }
 
 type MirrorStats struct {
