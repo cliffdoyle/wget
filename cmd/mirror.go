@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"container/list"
 	"fmt"
 	"io"
 	"log"
@@ -24,12 +25,22 @@ type MirrorContext struct {
 	ExcludeDirs   []string
 	ConvertLinks  bool
 	MaxDepth      int
-	DownloadQueue chan MirrorDownloadTask
-	WaitGroup     sync.WaitGroup
 	Client        *http.Client
 	mu            sync.Mutex
+	waitGroup     sync.WaitGroup
+	workQueue     *list.List
+	activeWorkers int
+	maxWorkers    int
+	stats         *MirrorStats
 }
 
+type MirrorStats struct {
+	TotalDiscovered int
+	TotalDownloaded int
+	TotalFailed     int
+	TotalSkipped    int
+	StartTime       time.Time
+}
 type MirrorDownloadTask struct {
 	URL   string
 	Depth int
@@ -123,6 +134,45 @@ func InitMirroring(startURL string) error {
 
 	fmt.Printf("\nMirroring completed! Saved to %s/\n", outputDir)
 	return nil
+}
+
+func (ctx *MirrorContext) enqueueTask(task MirrorDownloadTask) {
+	ctx.mu.Lock()
+	defer ctx.mu.Unlock()
+
+	if task.Depth > ctx.MaxDepth {
+		ctx.stats.TotalSkipped++
+		return
+	}
+
+	if _, visited := ctx.VisitedURLs.Load(task.URL); visited {
+		ctx.stats.TotalSkipped++
+		return
+	}
+
+	ctx.VisitedURLs.Store(task.URL, true)
+	ctx.workQueue.PushBack(task)
+	ctx.stats.TotalDiscovered++
+
+	if ctx.activeWorkers < ctx.maxWorkers {
+		ctx.waitGroup.Add(1)
+		ctx.activeWorkers++
+		go ctx.mirrorWorker(ctx.activeWorkers)
+	}
+}
+
+func (ctx *MirrorContext) dequeueTask() (MirrorDownloadTask, bool) {
+	ctx.mu.Lock()
+	defer ctx.mu.Unlock()
+
+	if ctx.workQueue.Len() == 0 {
+		return MirrorDownloadTask{}, false
+	}
+
+	front := ctx.workQueue.Front()
+	task := front.Value.(MirrorDownloadTask)
+	ctx.workQueue.Remove(front)
+	return task, true
 }
 
 func (ctx *MirrorContext) mirrorWorker(workerID int) {
