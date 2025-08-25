@@ -590,8 +590,10 @@ func (ctx *MirrorContext) extractBaseURL(doc *html.Node, currentURL string) {
 					baseURL, err := url.Parse(attr.Val)
 					if err == nil {
 						current, err := url.Parse(currentURL)
-						if err == nil && current != nil {
-							ctx.BaseURL = current.ResolveReference(baseURL)
+						if err == nil {
+							ctx.mu.Lock()
+							ctx.baseURL = current.ResolveReference(baseURL)
+							ctx.mu.Unlock()
 						}
 					}
 				}
@@ -610,9 +612,11 @@ func (ctx *MirrorContext) resolveURLWithBase(link, baseURL string) (string, erro
 		return "", err
 	}
 
-	if base.String() != ctx.BaseURL.String() {
-		ctx.BaseURL = base
+	ctx.mu.Lock()
+	if ctx.baseURL != nil {
+		base = ctx.baseURL
 	}
+	ctx.mu.Unlock()
 
 	relative, err := url.Parse(link)
 	if err != nil {
