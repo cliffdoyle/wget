@@ -457,20 +457,6 @@ func (ctx *MirrorContext) processFoundLink(link, baseURL string, depth int) {
 	})
 }
 
-func (ctx *MirrorContext) resolveURL(link, baseURL string) (string, error) {
-	base, err := url.Parse(baseURL)
-	if err != nil {
-		return "", err
-	}
-
-	relative, err := url.Parse(link)
-	if err != nil {
-		return "", err
-	}
-
-	return base.ResolveReference(relative).String(), nil
-}
-
 func (ctx *MirrorContext) isSameDomain(urlStr string) bool {
 	parsedURL, err := url.Parse(urlStr)
 	if err != nil {
