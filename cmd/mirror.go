@@ -28,10 +28,11 @@ type MirrorContext struct {
 	Client        *http.Client
 	mu            sync.Mutex
 	waitGroup     sync.WaitGroup
-	workQueue     *list.List
+	workQueue     *list.List // Change from DownloadQueue to workQueue
 	activeWorkers int
 	maxWorkers    int
 	stats         *MirrorStats
+	// baseURL field is not needed here, as BaseURL already exists
 }
 
 type MirrorStats struct {
@@ -84,13 +85,20 @@ func InitMirroring(startURL string) error {
 	}
 
 	ctx := &MirrorContext{
-		BaseURL:       parsedURL,
-		OutputDir:     outputDir,
-		RejectList:    rejectList,
-		ExcludeDirs:   excludeDirs,
-		ConvertLinks:  MirrorFlagsConfig.ConvertLinks,
-		MaxDepth:      MirrorFlagsConfig.Depth,
-		DownloadQueue: make(chan MirrorDownloadTask, 100),
+		BaseURL:      parsedURL,
+		OutputDir:    outputDir,
+		RejectList:   rejectList,
+		ExcludeDirs:  excludeDirs,
+		ConvertLinks: MirrorFlagsConfig.ConvertLinks,
+		MaxDepth:     MirrorFlagsConfig.Depth,
+		// Initialize workQueue here
+		workQueue: list.New(),
+		// Initialize stats
+		stats: &MirrorStats{
+			StartTime: time.Now(),
+		},
+		maxWorkers: 5, // Set a default maxWorkers
+		// DownloadQueue: make(chan MirrorDownloadTask, 100), // This channel is replaced by workQueue
 		Client: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
@@ -116,21 +124,16 @@ func InitMirroring(startURL string) error {
 	}
 	fmt.Println()
 
-	numWorkers := 5
-	for i := range numWorkers {
-		go ctx.mirrorWorker(i + 1)
-	}
+	// Start workers
+	ctx.startWorkers()
 
-	// add waitgroup to track when a task is assigned
-	ctx.WaitGroup.Add(1)
-	ctx.DownloadQueue <- MirrorDownloadTask{
+	// Enqueue the initial task
+	ctx.enqueueTask(MirrorDownloadTask{
 		URL:   startURL,
 		Depth: 0,
-	}
+	})
 
-	// the main loop should wait and close the channel once done*
-	ctx.WaitGroup.Wait()
-	close(ctx.DownloadQueue)
+	ctx.waitGroup.Wait() // Wait for all tasks to complete
 
 	fmt.Printf("\nMirroring completed! Saved to %s/\n", outputDir)
 	return nil
@@ -150,14 +153,13 @@ func (ctx *MirrorContext) enqueueTask(task MirrorDownloadTask) {
 		return
 	}
 
-	ctx.VisitedURLs.Store(task.URL, true)
+	ctx.VisitedURLs.Store(task.URL, true) // Mark as visited before adding to queue
 	ctx.workQueue.PushBack(task)
 	ctx.stats.TotalDiscovered++
 
-	if ctx.activeWorkers < ctx.maxWorkers {
-		ctx.waitGroup.Add(1)
-		ctx.activeWorkers++
-		go ctx.mirrorWorker(ctx.activeWorkers)
+	// Signal a worker if one is idle, or start a new one if below max
+	if ctx.activeWorkers < ctx.maxWorkers && ctx.workQueue.Len() == 1 { // Only signal if a new task arrived and workers might be idle
+		// No explicit signal needed with this worker pool pattern, workers will pick up from queue
 	}
 }
 
@@ -179,10 +181,10 @@ func (ctx *MirrorContext) startWorkers() {
 	ctx.mu.Lock()
 	defer ctx.mu.Unlock()
 
-	for i := 0; i < ctx.maxWorkers; i++ {
-		ctx.waitGroup.Add(1)
-		ctx.activeWorkers++
-		go ctx.mirrorWorker(i + 1)
+	for i := 0; i < ctx.maxWorkers; i++ { // Start all workers initially
+		ctx.waitGroup.Add(1)       // Increment for each worker
+		ctx.activeWorkers++        // Track active workers
+		go ctx.mirrorWorker(i + 1) // Start the worker goroutine
 	}
 }
 
@@ -194,10 +196,13 @@ func (ctx *MirrorContext) mirrorWorker(workerID int) {
 		ctx.waitGroup.Done()
 	}()
 
+	// Loop indefinitely, picking tasks from the queue
 	for {
 		task, ok := ctx.dequeueTask()
 		if !ok {
-			return
+			// If no tasks, wait a bit and check again, or break if all workers are idle and queue is empty
+			time.Sleep(100 * time.Millisecond) // Small delay to prevent busy-waiting
+			continue
 		}
 		ctx.processDownloadTask(task, workerID)
 	}
@@ -215,16 +220,18 @@ func (ctx *MirrorContext) printStatistics() {
 }
 
 func (ctx *MirrorContext) processDownloadTask(task MirrorDownloadTask, workerID int) {
+	// Check depth again, though it should be handled by enqueueTask
 	if task.Depth > ctx.MaxDepth {
+		ctx.stats.TotalSkipped++
 		return
 	}
 
+	// Check visited again, though it should be handled by enqueueTask
 	if _, visited := ctx.VisitedURLs.Load(task.URL); visited {
+		ctx.stats.TotalSkipped++
 		return
 	}
 	ctx.VisitedURLs.Store(task.URL, true)
-
-	fmt.Printf("[Worker %d] Depth %d: %s\n", workerID, task.Depth, task.URL)
 
 	filePath, err := ctx.downloadResource(task.URL)
 	if err != nil {
@@ -233,7 +240,10 @@ func (ctx *MirrorContext) processDownloadTask(task MirrorDownloadTask, workerID 
 	}
 
 	if ctx.isHTMLFile(task.URL) || strings.HasSuffix(filePath, ".html") {
+		fmt.Printf("[Worker %d] Depth %d: %s (Downloaded HTML)\n", workerID, task.Depth, task.URL)
 		ctx.parseHTMLForLinks(filePath, task.URL, task.Depth+1)
+	} else {
+		fmt.Printf("[Worker %d] Depth %d: %s (Downloaded resource)\n", workerID, task.Depth, task.URL)
 	}
 }
 
@@ -286,7 +296,7 @@ func (ctx *MirrorContext) downloadResource(urlStr string) (string, error) {
 	}
 
 	if isHTML && ctx.ConvertLinks {
-		if err := ctx.convertLinksInHTML(filePath); err != nil {
+		if err := ctx.convertLinksInHTML(filePath, urlStr); err != nil {
 			log.Printf("Link conversion failed for %s: %v", filePath, err)
 		}
 	}
@@ -454,14 +464,11 @@ func (ctx *MirrorContext) processFoundLink(link, baseURL string, depth int) {
 		return
 	}
 
-	ctx.mu.Lock()
-	// add wait when a task is added, the worker should remove when done
-	ctx.WaitGroup.Add(1)
-	ctx.DownloadQueue <- MirrorDownloadTask{
+	// Enqueue the task, which will handle visited checks and worker signaling
+	ctx.enqueueTask(MirrorDownloadTask{
 		URL:   absoluteURL,
 		Depth: depth,
-	}
-	ctx.mu.Unlock()
+	})
 }
 
 func (ctx *MirrorContext) resolveURL(link, baseURL string) (string, error) {
@@ -590,4 +597,45 @@ func (ctx *MirrorContext) processSrcSet(srcset, baseURL string, depth int) {
 			ctx.processFoundLink(parts[0], baseURL, depth)
 		}
 	}
+}
+
+func (ctx *MirrorContext) extractBaseURL(doc *html.Node, currentURL string) {
+	var f func(*html.Node)
+	f = func(n *html.Node) {
+		if n.Type == html.ElementNode && n.Data == "base" {
+			for _, attr := range n.Attr {
+				if attr.Key == "href" {
+					baseURL, err := url.Parse(attr.Val)
+					if err == nil {
+						current, err := url.Parse(currentURL)
+						if err == nil && current != nil {
+							ctx.BaseURL = current.ResolveReference(baseURL)
+						}
+					}
+				}
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			f(c)
+		}
+	}
+	f(doc)
+}
+
+func (ctx *MirrorContext) resolveURLWithBase(link, baseURL string) (string, error) {
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return "", err
+	}
+
+	if base.String() != ctx.BaseURL.String() {
+		ctx.BaseURL = base
+	}
+
+	relative, err := url.Parse(link)
+	if err != nil {
+		return "", err
+	}
+
+	return base.ResolveReference(relative).String(), nil
 }
