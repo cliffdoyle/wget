@@ -553,3 +553,14 @@ func (ctx *MirrorContext) getRelativePath(absoluteURL, htmlDir, outputBase strin
 
 	return filepath.ToSlash(relativePath), nil
 }
+
+func (ctx *MirrorContext) extractLinksFromCSS(cssContent, baseURL string, depth int) {
+	re := regexp.MustCompile(`url\(['"]?([^'")]+)['"]?\)`)
+	matches := re.FindAllStringSubmatch(cssContent, -1)
+
+	for _, match := range matches {
+		if len(match) > 1 {
+			ctx.processFoundLink(match[1], baseURL, depth)
+		}
+	}
+}
