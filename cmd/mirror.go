@@ -377,73 +377,44 @@ func (ctx *MirrorContext) isExcludedDirectory(urlStr string) bool {
 	return false
 }
 
-func (ctx *MirrorContext) parseHTMLForLinks(filePath, baseURL string, depth int) {
-	file, err := os.Open(filePath)
+func (ctx *MirrorContext) extractLinksFromNode(n *html.Node, baseURL string, depth int) {
+	if n.Type == html.ElementNode {
+		for _, attr := range n.Attr {
+			switch attr.Key {
+			case "href", "src", "action", "data-src", "data-href", "poster", "background":
+				ctx.processFoundLink(attr.Val, baseURL, depth)
+			case "srcset":
+				ctx.processSrcSet(attr.Val, baseURL, depth)
+			case "style":
+				ctx.extractLinksFromCSS(attr.Val, baseURL, depth)
+			}
+		}
+	}
+
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		ctx.extractLinksFromNode(c, baseURL, depth)
+	}
+}
+
+func (ctx *MirrorContext) parseHTMLForLinks(filePath, baseURL string, currentDepth int) {
+	content, err := os.ReadFile(filePath)
 	if err != nil {
-		log.Printf("Failed to open HTML file: %v", err)
+		log.Printf("Failed to read HTML file: %v", err)
 		return
 	}
-	defer file.Close()
 
-	doc, err := html.Parse(file)
+	htmlContent := string(content)
+
+	doc, err := html.Parse(strings.NewReader(htmlContent))
 	if err != nil {
 		log.Printf("Failed to parse HTML: %v", err)
 		return
 	}
 
-	var extractLinks func(*html.Node)
-	extractLinks = func(n *html.Node) {
-		if n.Type == html.ElementNode {
-			var linkAttr string
-			switch n.Data {
-			case "a", "link":
-				linkAttr = "href"
-			case "img", "script", "iframe":
-				linkAttr = "src"
-			case "form":
-				linkAttr = "action"
-			}
-
-			for _, attr := range n.Attr {
-				// main link attribute
-				if linkAttr != "" && attr.Key == linkAttr {
-					ctx.processFoundLink(attr.Val, baseURL, depth)
-				}
-
-				//this part handles tags with the style attribute
-				if attr.Key == "style" {
-					re := regexp.MustCompile(`url\(([^)]+)\)`)
-					matches := re.FindAllStringSubmatch(attr.Val, -1)
-					for _, m := range matches {
-						rawUrl := strings.Trim(m[1], `"'`)
-						ctx.processFoundLink(rawUrl, baseURL, depth)
-					}
-				}
-			}
-
-			//this part handles links inside the textcontent of the style div
-			if n.Data == "style" {
-				var cssContent string
-				for c := n.FirstChild; c != nil; c = c.NextSibling {
-					if c.Type == html.TextNode {
-						cssContent += c.Data
-					}
-				}
-				re := regexp.MustCompile(`url\(([^)]+)\)`)
-				matches := re.FindAllStringSubmatch(cssContent, -1)
-				for _, m := range matches {
-					rawUrl := strings.Trim(m[1], `"'`)
-					ctx.processFoundLink(rawUrl, baseURL, depth)
-				}
-			}
-		}
-
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			extractLinks(c)
-		}
-	}
-
-	extractLinks(doc)
+	ctx.extractBaseURL(doc, baseURL)
+	ctx.extractLinksFromNode(doc, baseURL, currentDepth+1)
+	ctx.extractLinksFromCSS(htmlContent, baseURL, currentDepth+1)
+	ctx.extractLinksFromJavaScript(htmlContent, baseURL, currentDepth+1)
 }
 
 func (ctx *MirrorContext) processFoundLink(link, baseURL string, depth int) {
@@ -590,8 +561,8 @@ func (ctx *MirrorContext) extractLinksFromJavaScript(jsContent, baseURL string, 
 }
 
 func (ctx *MirrorContext) processSrcSet(srcset, baseURL string, depth int) {
-	entries := strings.Split(srcset, ",")
-	for _, entry := range entries {
+	entries := strings.SplitSeq(srcset, ",")
+	for entry := range entries {
 		parts := strings.Fields(strings.TrimSpace(entry))
 		if len(parts) > 0 {
 			ctx.processFoundLink(parts[0], baseURL, depth)
