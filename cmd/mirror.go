@@ -564,3 +564,20 @@ func (ctx *MirrorContext) extractLinksFromCSS(cssContent, baseURL string, depth 
 		}
 	}
 }
+
+func (ctx *MirrorContext) extractLinksFromJavaScript(jsContent, baseURL string, depth int) {
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`['"](/[^'"]+)['"]`),
+		regexp.MustCompile(`['"](https?://[^'"]+)['"]`),
+		regexp.MustCompile(`\.(href|src)\s*=\s*['"]([^'"]+)['"]`),
+	}
+
+	for _, pattern := range patterns {
+		matches := pattern.FindAllStringSubmatch(jsContent, -1)
+		for _, match := range matches {
+			if len(match) > 1 {
+				ctx.processFoundLink(match[1], baseURL, depth)
+			}
+		}
+	}
+}
