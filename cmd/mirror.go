@@ -490,29 +490,66 @@ func (ctx *MirrorContext) isSameDomain(urlStr string) bool {
 	return baseHost == targetHost
 }
 
-func (ctx *MirrorContext) convertLinksInHTML(filePath string) error {
+func (ctx *MirrorContext) convertLinksInHTML(filePath, originalURL string) error {
 	content, err := os.ReadFile(filePath)
 	if err != nil {
 		return err
 	}
 
 	htmlContent := string(content)
-	baseURL := ctx.BaseURL.String()
-	baseHost := ctx.BaseURL.Host
 
-	replacements := []struct {
-		old string
-		new string
+	htmlDir := filepath.Dir(filePath)
+	outputBase := ctx.OutputDir
+
+	patterns := []struct {
+		pattern *regexp.Regexp
+		replace string
 	}{
-		{baseURL, ""},
-		{"https://" + baseHost, ""},
-		{"http://" + baseHost, ""},
-		{"//" + baseHost, ""},
+		{
+			regexp.MustCompile(`(?i)(href|src|action)=["'](\s*https?://[^"']+)["']`),
+			`$1="$2"`,
+		},
+		{
+			regexp.MustCompile(`(?i)url\((\s*https?://[^)]+)\)`),
+			`url($1)`,
+		},
 	}
 
-	for _, r := range replacements {
-		htmlContent = strings.ReplaceAll(htmlContent, r.old, r.new)
+	for _, p := range patterns {
+		htmlContent = p.pattern.ReplaceAllStringFunc(htmlContent, func(match string) string {
+			parts := p.pattern.FindStringSubmatch(match)
+			if len(parts) < 3 {
+				return match
+			}
+
+			absoluteURL := parts[2]
+			relativePath, err := ctx.getRelativePath(absoluteURL, htmlDir, outputBase)
+			if err != nil {
+				return match
+			}
+
+			return strings.Replace(match, absoluteURL, relativePath, 1)
+		})
 	}
 
 	return os.WriteFile(filePath, []byte(htmlContent), 0644)
+}
+
+func (ctx *MirrorContext) getRelativePath(absoluteURL, htmlDir, outputBase string) (string, error) {
+
+	if !ctx.isSameDomain(absoluteURL) {
+		return absoluteURL, nil
+	}
+
+	localPath, err := ctx.getLocalPath(absoluteURL, false)
+	if err != nil {
+		return "", err
+	}
+
+	relativePath, err := filepath.Rel(htmlDir, localPath)
+	if err != nil {
+		return "", err
+	}
+
+	return filepath.ToSlash(relativePath), nil
 }
