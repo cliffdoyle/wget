@@ -175,12 +175,43 @@ func (ctx *MirrorContext) dequeueTask() (MirrorDownloadTask, bool) {
 	return task, true
 }
 
-func (ctx *MirrorContext) mirrorWorker(workerID int) {
-	//the worker should report done when finished with a task, we track when work is done
-	for task := range ctx.DownloadQueue {
-		ctx.processDownloadTask(task, workerID)
-		ctx.WaitGroup.Done()
+func (ctx *MirrorContext) startWorkers() {
+	ctx.mu.Lock()
+	defer ctx.mu.Unlock()
+
+	for i := 0; i < ctx.maxWorkers; i++ {
+		ctx.waitGroup.Add(1)
+		ctx.activeWorkers++
+		go ctx.mirrorWorker(i + 1)
 	}
+}
+
+func (ctx *MirrorContext) mirrorWorker(workerID int) {
+	defer func() {
+		ctx.mu.Lock()
+		ctx.activeWorkers--
+		ctx.mu.Unlock()
+		ctx.waitGroup.Done()
+	}()
+
+	for {
+		task, ok := ctx.dequeueTask()
+		if !ok {
+			return
+		}
+		ctx.processDownloadTask(task, workerID)
+	}
+}
+
+func (ctx *MirrorContext) printStatistics() {
+	elapsed := time.Since(ctx.stats.StartTime)
+
+	fmt.Printf("\n=== Mirroring Statistics ===\n")
+	fmt.Printf("Total URLs discovered: %d\n", ctx.stats.TotalDiscovered)
+	fmt.Printf("Successfully downloaded: %d\n", ctx.stats.TotalDownloaded)
+	fmt.Printf("Failed downloads: %d\n", ctx.stats.TotalFailed)
+	fmt.Printf("Skipped URLs: %d\n", ctx.stats.TotalSkipped)
+	fmt.Printf("Time elapsed: %v\n", elapsed.Round(time.Second))
 }
 
 func (ctx *MirrorContext) processDownloadTask(task MirrorDownloadTask, workerID int) {
