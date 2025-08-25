@@ -193,12 +193,16 @@ func (ctx *MirrorContext) mirrorWorker(workerID int) {
 		ctx.waitGroup.Done()
 	}()
 
-	// Loop indefinitely, picking tasks from the queue
 	for {
 		task, ok := ctx.dequeueTask()
 		if !ok {
-			// If no tasks, wait a bit and check again, or break if all workers are idle and queue is empty
-			time.Sleep(100 * time.Millisecond) // Small delay to prevent busy-waiting
+			ctx.mu.Lock()
+			if ctx.workQueue.Len() == 0 && ctx.activeWorkers == 1 {
+				ctx.mu.Unlock()
+				return
+			}
+			ctx.mu.Unlock()
+			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 		ctx.processDownloadTask(task, workerID)
