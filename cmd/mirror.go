@@ -422,7 +422,7 @@ func (ctx *MirrorContext) processFoundLink(link, baseURL string, depth int) {
 		return
 	}
 
-	absoluteURL, err := ctx.resolveURL(link, baseURL)
+	absoluteURL, err := ctx.resolveURLWithBase(link, baseURL)
 	if err != nil {
 		return
 	}
@@ -431,11 +431,21 @@ func (ctx *MirrorContext) processFoundLink(link, baseURL string, depth int) {
 		return
 	}
 
-	if _, visited := ctx.VisitedURLs.Load(absoluteURL); visited {
+	if ctx.isExcludedDirectory(absoluteURL) {
+		ctx.stats.TotalSkipped++
 		return
 	}
 
-	// Enqueue the task, which will handle visited checks and worker signaling
+	if ctx.shouldReject(absoluteURL) {
+		ctx.stats.TotalSkipped++
+		return
+	}
+
+	if _, visited := ctx.VisitedURLs.Load(absoluteURL); visited {
+		ctx.stats.TotalSkipped++
+		return
+	}
+
 	ctx.enqueueTask(MirrorDownloadTask{
 		URL:   absoluteURL,
 		Depth: depth,
