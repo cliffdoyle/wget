@@ -581,3 +581,13 @@ func (ctx *MirrorContext) extractLinksFromJavaScript(jsContent, baseURL string, 
 		}
 	}
 }
+
+func (ctx *MirrorContext) processSrcSet(srcset, baseURL string, depth int) {
+	entries := strings.Split(srcset, ",")
+	for _, entry := range entries {
+		parts := strings.Fields(strings.TrimSpace(entry))
+		if len(parts) > 0 {
+			ctx.processFoundLink(parts[0], baseURL, depth)
+		}
+	}
+}
