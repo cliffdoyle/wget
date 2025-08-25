@@ -185,6 +185,12 @@ func (ctx *MirrorContext) startWorkers() {
 	}
 }
 
+func (ctx *MirrorContext) isWorkComplete() bool {
+	ctx.mu.Lock()
+	defer ctx.mu.Unlock()
+	return ctx.workQueue.Len() == 0 && ctx.activeWorkers <= 1
+}
+
 func (ctx *MirrorContext) mirrorWorker(workerID int) {
 	defer func() {
 		ctx.mu.Lock()
@@ -196,12 +202,9 @@ func (ctx *MirrorContext) mirrorWorker(workerID int) {
 	for {
 		task, ok := ctx.dequeueTask()
 		if !ok {
-			ctx.mu.Lock()
-			if ctx.workQueue.Len() == 0 && ctx.activeWorkers == 1 {
-				ctx.mu.Unlock()
+			if ctx.isWorkComplete() {
 				return
 			}
-			ctx.mu.Unlock()
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
