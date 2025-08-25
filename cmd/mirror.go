@@ -96,6 +96,7 @@ func InitMirroring(startURL string) error {
 		stats: &MirrorStats{
 			StartTime: time.Now(),
 		},
+		baseURL: nil,
 		Client: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
