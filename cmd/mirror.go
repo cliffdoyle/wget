@@ -28,11 +28,10 @@ type MirrorContext struct {
 	Client        *http.Client
 	mu            sync.Mutex
 	waitGroup     sync.WaitGroup
-	workQueue     *list.List // Change from DownloadQueue to workQueue
+	workQueue     *list.List
 	activeWorkers int
 	maxWorkers    int
 	stats         *MirrorStats
-	// baseURL field is not needed here, as BaseURL already exists
 }
 
 type MirrorStats struct {
@@ -91,14 +90,11 @@ func InitMirroring(startURL string) error {
 		ExcludeDirs:  excludeDirs,
 		ConvertLinks: MirrorFlagsConfig.ConvertLinks,
 		MaxDepth:     MirrorFlagsConfig.Depth,
-		// Initialize workQueue here
-		workQueue: list.New(),
-		// Initialize stats
+		workQueue:    list.New(),
+		maxWorkers:   5,
 		stats: &MirrorStats{
 			StartTime: time.Now(),
 		},
-		maxWorkers: 5, // Set a default maxWorkers
-		// DownloadQueue: make(chan MirrorDownloadTask, 100), // This channel is replaced by workQueue
 		Client: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
@@ -124,16 +120,16 @@ func InitMirroring(startURL string) error {
 	}
 	fmt.Println()
 
-	// Start workers
-	ctx.startWorkers()
-
-	// Enqueue the initial task
 	ctx.enqueueTask(MirrorDownloadTask{
 		URL:   startURL,
 		Depth: 0,
 	})
 
-	ctx.waitGroup.Wait() // Wait for all tasks to complete
+	ctx.startWorkers()
+
+	ctx.waitGroup.Wait()
+
+	ctx.printStatistics()
 
 	fmt.Printf("\nMirroring completed! Saved to %s/\n", outputDir)
 	return nil
