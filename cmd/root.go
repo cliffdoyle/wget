@@ -13,6 +13,8 @@ type MirrorFlags struct {
 	Exclude      string
 	ConvertLinks bool
 	Depth        int
+	Timeout      int
+	MaxPages     int
 }
 
 type DownloadFlags struct {
@@ -72,4 +74,6 @@ func init() {
 	rootCmd.Flags().StringVarP(&MirrorFlagsConfig.Exclude, "exclude-directories", "X", "", "Comma-separated list of directories to exclude")
 	rootCmd.Flags().BoolVarP(&MirrorFlagsConfig.ConvertLinks, "convert-links", "k", false, "Convert links for offline viewing")
 	rootCmd.Flags().IntVarP(&MirrorFlagsConfig.Depth, "level", "l", 5, "Maximum recursion depth")
+	rootCmd.Flags().IntVarP(&MirrorFlagsConfig.Timeout, "mirror-timeout", "", 0, "Timeout for the mirror operation in seconds (0 = no timeout)")
+	rootCmd.Flags().IntVarP(&MirrorFlagsConfig.MaxPages, "mirror-max-pages", "", 0, "Maximum number of pages to download while mirroring (0 = no limit)")
 }
