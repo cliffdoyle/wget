@@ -1,7 +1,7 @@
 package cmd
 
 import (
-	"container/list"
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -9,451 +9,529 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/html"
 )
 
-type MirrorContext struct {
-	BaseURL      *url.URL
-	OutputDir    string
-	VisitedURLs  sync.Map
-	RejectList   []string
-	ExcludeDirs  []string
-	ConvertLinks bool
-	MaxDepth     int
-	Client       *http.Client
+type mirror struct {
+	baseURL     *url.URL
+	outputDir   string
+	client      *http.Client
+	ctx         context.Context
+	cancel      context.CancelFunc
+	workers     int
+	tasks       chan task
+	visited     sync.Map
+	rejectExts  []string
+	excludeDirs []string
+	convert     bool
+	maxDepth    int
+	maxPages    int
+	tasksClosed uint32
 
-	mu            sync.Mutex
-	waitGroup     sync.WaitGroup
-	workQueue     *list.List
-	activeWorkers int
-	maxWorkers    int
-	stats         *MirrorStats
-	baseURL       *url.URL
+	stats   mirrorStats
+	statsMu sync.Mutex
 }
 
-type MirrorStats struct {
-	TotalDiscovered int
-	TotalDownloaded int
-	TotalFailed     int
-	TotalSkipped    int
-	StartTime       time.Time
+type task struct {
+	url   string
+	depth int
 }
 
-type MirrorDownloadTask struct {
-	URL   string
-	Depth int
+type mirrorStats struct {
+	discovered int
+	downloaded int
+	failed     int
+	skipped    int
+	start      time.Time
 }
 
 func InitMirroring(startURL string) error {
-	parsedURL, err := url.Parse(startURL)
+	parsed, err := url.Parse(startURL)
 	if err != nil {
 		return fmt.Errorf("invalid URL: %w", err)
 	}
 
-	outputDir := parsedURL.Host
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		return fmt.Errorf("failed to create output directory: %w", err)
+	out := parsed.Host
+	if err := os.MkdirAll(out, 0755); err != nil {
+		return fmt.Errorf("failed to create output dir: %w", err)
 	}
 
-	// Build reject list
-	var rejectList []string
+	var rej []string
 	if MirrorFlagsConfig.Reject != "" {
-		rejectList = strings.Split(MirrorFlagsConfig.Reject, ",")
-		for i, ext := range rejectList {
-			ext = strings.TrimSpace(ext)
-			if ext != "" {
-				if !strings.HasPrefix(ext, ".") {
-					ext = "." + ext
-				}
-				rejectList[i] = strings.ToLower(ext)
+		for e := range strings.SplitSeq(MirrorFlagsConfig.Reject, ",") {
+			e = strings.TrimSpace(e)
+			if e == "" {
+				continue
 			}
+			if !strings.HasPrefix(e, ".") {
+				e = "." + e
+			}
+			rej = append(rej, strings.ToLower(e))
 		}
 	}
-
-	var excludeDirs []string
+	var excl []string
 	if MirrorFlagsConfig.Exclude != "" {
-		excludeDirs = strings.Split(MirrorFlagsConfig.Exclude, ",")
-		for i, dir := range excludeDirs {
-			dir = strings.Trim(strings.TrimSpace(dir), "/")
-			if dir != "" {
-				excludeDirs[i] = dir
+		for d := range strings.SplitSeq(MirrorFlagsConfig.Exclude, ",") {
+			d = strings.Trim(strings.TrimSpace(d), "/")
+			if d != "" {
+				excl = append(excl, d)
 			}
 		}
 	}
 
-	ctx := &MirrorContext{
-		BaseURL:      parsedURL,
-		OutputDir:    outputDir,
-		RejectList:   rejectList,
-		ExcludeDirs:  excludeDirs,
-		ConvertLinks: MirrorFlagsConfig.ConvertLinks,
-		MaxDepth:     MirrorFlagsConfig.Depth,
-		workQueue:    list.New(),
-		maxWorkers:   5,
-		stats: &MirrorStats{
-			StartTime: time.Now(),
-		},
-		Client: &http.Client{
-			Timeout: 30 * time.Second,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if len(via) >= 10 {
-					return http.ErrUseLastResponse
-				}
-				return nil
-			},
-		},
-	}
-
-	fmt.Printf("Mirroring website: %s\n", startURL)
-	fmt.Printf("Output directory: %s/\n", outputDir)
-	fmt.Printf("Max depth: %d\n", ctx.MaxDepth)
-
-	if len(rejectList) > 0 {
-		fmt.Printf("Rejecting extensions: %s\n", strings.Join(rejectList, ", "))
-	}
-	if len(excludeDirs) > 0 {
-		fmt.Printf("Excluding directories: %s\n", strings.Join(excludeDirs, ", "))
-	}
-	if ctx.ConvertLinks {
-		fmt.Println("Converting links for offline viewing")
-	}
-	fmt.Println()
-
-	ctx.enqueueTask(MirrorDownloadTask{URL: startURL, Depth: 0})
-	ctx.startWorkers()
-	ctx.waitGroup.Wait()
-	ctx.printStatistics()
-
-	fmt.Printf("\nMirroring completed! Saved to %s/\n", outputDir)
-	return nil
-}
-
-func (ctx *MirrorContext) enqueueTask(task MirrorDownloadTask) {
-	ctx.mu.Lock()
-	defer ctx.mu.Unlock()
-
-	if task.Depth > ctx.MaxDepth {
-		ctx.stats.TotalSkipped++
-		return
-	}
-	if _, visited := ctx.VisitedURLs.Load(task.URL); visited {
-		ctx.stats.TotalSkipped++
-		return
-	}
-
-	ctx.VisitedURLs.Store(task.URL, true)
-	ctx.workQueue.PushBack(task)
-	ctx.stats.TotalDiscovered++
-}
-
-func (ctx *MirrorContext) dequeueTask() (MirrorDownloadTask, bool) {
-	ctx.mu.Lock()
-	defer ctx.mu.Unlock()
-	if ctx.workQueue.Len() == 0 {
-		return MirrorDownloadTask{}, false
-	}
-	front := ctx.workQueue.Front()
-	task := front.Value.(MirrorDownloadTask)
-	ctx.workQueue.Remove(front)
-	return task, true
-}
-
-func (ctx *MirrorContext) startWorkers() {
-	ctx.mu.Lock()
-	defer ctx.mu.Unlock()
-	for i := 0; i < ctx.maxWorkers; i++ {
-		ctx.waitGroup.Add(1)
-		ctx.activeWorkers++
-		go ctx.mirrorWorker(i + 1)
-	}
-}
-
-func (ctx *MirrorContext) isWorkComplete() bool {
-	ctx.mu.Lock()
-	defer ctx.mu.Unlock()
-	return ctx.workQueue.Len() == 0 && ctx.activeWorkers == 0
-}
-
-func (ctx *MirrorContext) mirrorWorker(workerID int) {
-	defer func() {
-		ctx.mu.Lock()
-		ctx.activeWorkers--
-		ctx.mu.Unlock()
-		ctx.waitGroup.Done()
-	}()
-
-	for {
-		task, ok := ctx.dequeueTask()
-		if !ok {
-			if ctx.isWorkComplete() {
-				return
-			}
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-		ctx.processDownloadTask(task, workerID)
-	}
-}
-
-func (ctx *MirrorContext) processDownloadTask(task MirrorDownloadTask, workerID int) {
-	filePath, err := ctx.downloadResource(task.URL)
-	if err != nil {
-		ctx.stats.TotalFailed++
-		log.Printf("Failed to download %s: %v", task.URL, err)
-		return
-	}
-	ctx.stats.TotalDownloaded++
-
-	if ctx.isHTMLFile(task.URL) || strings.HasSuffix(filePath, ".html") {
-		fmt.Printf("[Worker %d] Depth %d: %s (HTML)\n", workerID, task.Depth, task.URL)
-		ctx.parseHTMLForLinks(filePath, task.URL, task.Depth+1)
+	var rootCtx context.Context
+	var cancel context.CancelFunc
+	if MirrorFlagsConfig.Timeout > 0 {
+		rootCtx, cancel = context.WithTimeout(context.Background(), time.Duration(MirrorFlagsConfig.Timeout)*time.Second)
 	} else {
-		fmt.Printf("[Worker %d] Depth %d: %s (Resource)\n", workerID, task.Depth, task.URL)
+		rootCtx, cancel = context.WithCancel(context.Background())
+	}
+
+	client := &http.Client{Timeout: 0}
+
+	m := &mirror{
+		baseURL:     parsed,
+		outputDir:   out,
+		client:      client,
+		ctx:         rootCtx,
+		cancel:      cancel,
+		workers:     runtime.GOMAXPROCS(0) * 2,
+		tasks:       make(chan task, 1024),
+		rejectExts:  rej,
+		excludeDirs: excl,
+		convert:     MirrorFlagsConfig.ConvertLinks,
+		maxDepth:    MirrorFlagsConfig.Depth,
+		maxPages:    MirrorFlagsConfig.MaxPages,
+	}
+	m.stats.start = time.Now()
+
+	fmt.Printf("Mirroring %s -> %s/ (depth=%d, convert=%v)\n", startURL, m.outputDir, m.maxDepth, m.convert)
+	if len(rej) > 0 {
+		fmt.Printf("Reject: %s\n", strings.Join(rej, ","))
+	}
+	if len(excl) > 0 {
+		fmt.Printf("Exclude dirs: %s\n", strings.Join(excl, ","))
+	}
+
+	robotsURL := parsed.Scheme + "://" + parsed.Host + "/robots.txt"
+	{
+		rc := &http.Client{Timeout: 10 * time.Second}
+		resp, err := rc.Get(robotsURL)
+		if err != nil {
+			log.Printf("robots probe failed: %v", err)
+		} else {
+			resp.Body.Close()
+			if resp.StatusCode >= 400 {
+				fmt.Printf("HTTP ERROR response %s [%s]\n", resp.Status, robotsURL)
+			} else {
+				fmt.Printf("HTTP response %s [%s]\n", resp.Status, robotsURL)
+			}
+		}
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < m.workers; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			m.workerLoop(id)
+		}(i + 1)
+	}
+
+	m.enqueue(startURL, 0)
+
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.ctx.Done():
+			log.Printf("mirror canceled: %v", m.ctx.Err())
+			m.closeTasks()
+			wg.Wait()
+			m.printStats()
+			return nil
+		case <-ticker.C:
+			if m.maxPages > 0 && m.getDiscovered() >= m.maxPages {
+				m.cancel()
+				continue
+			}
+			if len(m.tasks) == 0 {
+				time.Sleep(200 * time.Millisecond)
+				if len(m.tasks) == 0 {
+					m.closeTasks()
+					wg.Wait()
+					m.printStats()
+					return nil
+				}
+			}
+		}
 	}
 }
 
-func (ctx *MirrorContext) downloadResource(urlStr string) (string, error) {
-	if ctx.shouldReject(urlStr) {
-		return "", fmt.Errorf("rejected by extension filter")
+func (m *mirror) workerLoop(id int) {
+	for t := range m.tasks {
+		select {
+		case <-m.ctx.Done():
+			return
+		default:
+		}
+		m.process(t, id)
 	}
-	if ctx.isExcludedDirectory(urlStr) {
-		return "", fmt.Errorf("rejected by directory filter")
-	}
+}
 
-	req, err := http.NewRequest("GET", urlStr, nil)
+func (m *mirror) closeTasks() {
+	if atomic.CompareAndSwapUint32(&m.tasksClosed, 0, 1) {
+		close(m.tasks)
+	}
+}
+
+func (m *mirror) enqueue(raw string, depth int) {
+	if depth > m.maxDepth {
+		m.incSkipped()
+		return
+	}
+	if m.maxPages > 0 && m.getDiscovered() >= m.maxPages {
+		return
+	}
+	u, err := url.Parse(raw)
 	if err != nil {
-		return "", err
+		m.incSkipped()
+		return
+	}
+	if !u.IsAbs() {
+		u = m.baseURL.ResolveReference(u)
+	}
+	if !m.sameDomain(u) {
+		m.incSkipped()
+		return
+	}
+	key := u.String()
+	if _, loaded := m.visited.LoadOrStore(key, true); loaded {
+		m.incSkipped()
+		return
+	}
+	fmt.Printf("Adding URL: %s\n", key)
+	m.incDiscovered()
+	if atomic.LoadUint32(&m.tasksClosed) == 1 {
+		return
+	}
+	select {
+	case m.tasks <- task{url: key, depth: depth}:
+	case <-m.ctx.Done():
+		return
+	}
+}
+
+func (m *mirror) process(t task, workerID int) {
+	reqCtx, cancel := context.WithTimeout(m.ctx, 15*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, "GET", t.url, nil)
+	if err != nil {
+		m.incFailed()
+		log.Printf("[%d] request create failed: %v", workerID, err)
+		return
 	}
 	req.Header.Set("User-Agent", "Wget/1.0")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 
-	resp, err := ctx.Client.Do(req)
+	resp, err := m.client.Do(req)
 	if err != nil {
-		return "", err
+		m.incFailed()
+		log.Printf("[%d] GET %s failed: %v", workerID, t.url, err)
+		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-		return "", fmt.Errorf("HTTP %d %s", resp.StatusCode, resp.Status)
+		m.incFailed()
+		log.Printf("[%d] GET %s status: %s", workerID, t.url, resp.Status)
+		return
 	}
 
-	contentType := resp.Header.Get("Content-Type")
-	isHTML := strings.Contains(contentType, "text/html") || ctx.isHTMLFile(urlStr)
-
-	filePath, err := ctx.getLocalPath(urlStr, isHTML)
-	if err != nil {
-		return "", err
-	}
-	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
-		return "", err
-	}
-
-	file, err := os.Create(filePath)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-
-	if _, err := io.Copy(file, resp.Body); err != nil {
-		return "", err
-	}
-
-	if isHTML && ctx.ConvertLinks {
-		if err := ctx.rewriteLinksInHTML(filePath); err != nil {
-			log.Printf("Link rewriting failed for %s: %v", filePath, err)
+	ct := resp.Header.Get("Content-Type")
+	isHTML := strings.Contains(ct, "text/html") || looksLikeHTML(t.url)
+	if isHTML {
+		if parts := strings.Split(ct, "charset="); len(parts) > 1 {
+			enc := strings.TrimSpace(parts[1])
+			fmt.Printf("URI content encoding = '%s' (set by server response)\n", enc)
 		}
 	}
-	return filePath, nil
-}
 
-func (ctx *MirrorContext) getLocalPath(urlStr string, isHTML bool) (string, error) {
-	parsedURL, err := url.Parse(urlStr)
-	if err != nil {
-		return "", err
+	localPath := m.localPathForURL(t.url, isHTML)
+	if localPath == "" {
+		m.incFailed()
+		return
 	}
-	path := parsedURL.Path
-	if path == "" {
-		path = "/index.html"
-	} else if strings.HasSuffix(path, "/") {
-		path += "index.html"
-	} else if isHTML && !strings.Contains(path, ".") {
-		path += ".html"
-	}
-	return filepath.Clean(filepath.Join(ctx.OutputDir, path)), nil
-}
 
-func (ctx *MirrorContext) isHTMLFile(urlStr string) bool {
-	parsedURL, err := url.Parse(urlStr)
-	if err != nil {
-		return false
+	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
+		m.incFailed()
+		log.Printf("[%d] mkdir failed: %v", workerID, err)
+		return
 	}
-	path := parsedURL.Path
-	return path == "" || strings.HasSuffix(path, "/") ||
-		strings.HasSuffix(path, ".html") || strings.HasSuffix(path, ".htm") ||
-		!strings.Contains(path, ".")
-}
 
-func (ctx *MirrorContext) shouldReject(urlStr string) bool {
-	if len(ctx.RejectList) == 0 {
-		return false
-	}
-	parsedURL, err := url.Parse(urlStr)
+	fmt.Printf("Saving '%s'\n", localPath)
+	fmt.Printf("HTTP response %s [%s]\n", resp.Status, t.url)
+	f, err := os.Create(localPath)
 	if err != nil {
-		return false
+		m.incFailed()
+		log.Printf("[%d] create file failed: %v", workerID, err)
+		return
 	}
-	ext := strings.ToLower(filepath.Ext(strings.Split(parsedURL.Path, "?")[0]))
-	for _, rejectExt := range ctx.RejectList {
-		if ext == rejectExt {
-			return true
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		f.Close()
+		m.incFailed()
+		log.Printf("[%d] write failed: %v", workerID, err)
+		return
+	}
+	f.Close()
+	m.incDownloaded()
+
+	isCSS := strings.Contains(ct, "text/css") || strings.HasSuffix(strings.ToLower(t.url), ".css")
+	if isCSS {
+		if err := m.parseCSSForURLs(localPath, t.url, t.depth+1); err != nil {
+			log.Printf("[%d] parse css failed: %v", workerID, err)
 		}
 	}
-	return false
-}
 
-func (ctx *MirrorContext) isExcludedDirectory(urlStr string) bool {
-	if len(ctx.ExcludeDirs) == 0 {
-		return false
-	}
-	parsedURL, err := url.Parse(urlStr)
-	if err != nil {
-		return false
-	}
-	parts := strings.Split(strings.Trim(parsedURL.Path, "/"), "/")
-	for _, excluded := range ctx.ExcludeDirs {
-		for _, part := range parts {
-			if part == excluded {
-				return true
+	if m.convert {
+		if isHTML {
+			if err := m.rewriteLinks(localPath, t.url); err != nil {
+				log.Printf("[%d] rewrite failed: %v", workerID, err)
+			}
+			fmt.Printf("convert %s %s %s\n\n", localPath, t.url, "utf-8")
+		} else if isCSS {
+			if err := m.rewriteCSS(localPath, t.url); err != nil {
+				log.Printf("[%d] rewrite css failed: %v", workerID, err)
 			}
 		}
 	}
-	return false
-}
 
-func (ctx *MirrorContext) parseHTMLForLinks(filePath, baseURL string, currentDepth int) {
-	content, err := os.ReadFile(filePath)
-	if err != nil {
-		return
-	}
-	doc, err := html.Parse(strings.NewReader(string(content)))
-	if err != nil {
-		return
-	}
-	ctx.extractBaseURL(doc, baseURL)
-	ctx.extractLinksFromNode(doc, baseURL, currentDepth)
-}
-
-func (ctx *MirrorContext) extractLinksFromNode(n *html.Node, baseURL string, depth int) {
-	if n.Type == html.ElementNode {
-		for _, attr := range n.Attr {
-			switch attr.Key {
-			case "href", "src", "action", "data-src", "data-href", "poster", "background":
-				ctx.processFoundLink(attr.Val, baseURL, depth)
-			case "srcset":
-				for _, entry := range strings.Split(attr.Val, ",") {
-					parts := strings.Fields(strings.TrimSpace(entry))
-					if len(parts) > 0 {
-						ctx.processFoundLink(parts[0], baseURL, depth)
-					}
-				}
-			}
+	if isHTML {
+		if err := m.extractAndEnqueueLinks(localPath, t.url, t.depth+1); err != nil {
+			log.Printf("[%d] extract failed: %v", workerID, err)
 		}
 	}
-	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		ctx.extractLinksFromNode(c, baseURL, depth)
-	}
 }
 
-func (ctx *MirrorContext) processFoundLink(link, baseURL string, depth int) {
-	if link == "" || strings.HasPrefix(link, "#") || strings.HasPrefix(link, "javascript:") {
-		return
-	}
-	absoluteURL, err := ctx.resolveURLWithBase(link, baseURL)
-	if err != nil || !ctx.isSameDomain(absoluteURL) {
-		return
-	}
-	if ctx.isExcludedDirectory(absoluteURL) || ctx.shouldReject(absoluteURL) {
-		ctx.stats.TotalSkipped++
-		return
-	}
-	if _, visited := ctx.VisitedURLs.Load(absoluteURL); visited {
-		ctx.stats.TotalSkipped++
-		return
-	}
-	ctx.enqueueTask(MirrorDownloadTask{URL: absoluteURL, Depth: depth})
-}
-
-func (ctx *MirrorContext) isSameDomain(urlStr string) bool {
-	parsedURL, err := url.Parse(urlStr)
+func (m *mirror) extractAndEnqueueLinks(localPath, baseURL string, depth int) error {
+	data, err := os.ReadFile(localPath)
 	if err != nil {
-		return false
+		return err
 	}
-	baseHost := strings.TrimPrefix(ctx.BaseURL.Host, "www.")
-	targetHost := strings.TrimPrefix(parsedURL.Host, "www.")
-	return baseHost == targetHost
-}
-
-func (ctx *MirrorContext) resolveURLWithBase(link, baseURL string) (string, error) {
-	base, err := url.Parse(baseURL)
+	doc, err := html.Parse(strings.NewReader(string(data)))
 	if err != nil {
-		return "", err
+		return err
 	}
-	ctx.mu.Lock()
-	if ctx.baseURL != nil {
-		base = ctx.baseURL
-	}
-	ctx.mu.Unlock()
-	relative, err := url.Parse(link)
-	if err != nil {
-		return "", err
-	}
-	return base.ResolveReference(relative).String(), nil
-}
-
-func (ctx *MirrorContext) extractBaseURL(doc *html.Node, currentURL string) {
 	var f func(*html.Node)
 	f = func(n *html.Node) {
-		if n.Type == html.ElementNode && n.Data == "base" {
-			for _, attr := range n.Attr {
-				if attr.Key == "href" {
-					if baseURL, err := url.Parse(attr.Val); err == nil {
-						if current, err := url.Parse(currentURL); err == nil {
-							ctx.mu.Lock()
-							ctx.baseURL = current.ResolveReference(baseURL)
-							ctx.mu.Unlock()
+		if n.Type == html.ElementNode {
+			for _, a := range n.Attr {
+				switch a.Key {
+				case "href", "src", "action", "data-src", "data-href", "poster", "background":
+					if link := strings.TrimSpace(a.Val); link != "" {
+						if isSkippableLink(link) {
+							continue
+						}
+						if resolved, err := resolveWithBase(link, baseURL); err == nil {
+							if m.shouldReject(resolved) || m.isExcluded(resolved) {
+								m.incSkipped()
+								continue
+							}
+							m.enqueue(resolved, depth)
+						}
+					}
+				case "srcset":
+					for entry := range strings.SplitSeq(a.Val, ",") {
+						parts := strings.Fields(strings.TrimSpace(entry))
+						if len(parts) > 0 {
+							if resolved, err := resolveWithBase(parts[0], baseURL); err == nil {
+								if m.shouldReject(resolved) || m.isExcluded(resolved) {
+									m.incSkipped()
+									continue
+								}
+								m.enqueue(resolved, depth)
+							}
+						}
+					}
+				case "style":
+					if a.Val != "" {
+						matches := cssURLRe.FindAllStringSubmatch(a.Val, -1)
+						for _, mm := range matches {
+							if len(mm) < 2 {
+								continue
+							}
+							link := strings.TrimSpace(mm[1])
+							if link == "" || isSkippableLink(link) {
+								continue
+							}
+							if resolved, err := resolveWithBase(link, baseURL); err == nil {
+								if m.shouldReject(resolved) || m.isExcluded(resolved) {
+									m.incSkipped()
+									continue
+								}
+								m.enqueue(resolved, depth)
+							}
 						}
 					}
 				}
 			}
 		}
+		if n.Type == html.ElementNode && strings.EqualFold(n.Data, "style") {
+			for c := n.FirstChild; c != nil; c = c.NextSibling {
+				if c.Type == html.TextNode {
+					matches := cssURLRe.FindAllStringSubmatch(c.Data, -1)
+					for _, mm := range matches {
+						if len(mm) < 2 {
+							continue
+						}
+						link := strings.TrimSpace(mm[1])
+						if link == "" || isSkippableLink(link) {
+							continue
+						}
+						if resolved, err := resolveWithBase(link, baseURL); err == nil {
+							if m.shouldReject(resolved) || m.isExcluded(resolved) {
+								m.incSkipped()
+								continue
+							}
+							m.enqueue(resolved, depth)
+						}
+					}
+				}
+			}
+		}
+
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
 			f(c)
 		}
 	}
 	f(doc)
+	return nil
 }
 
-func (ctx *MirrorContext) rewriteLinksInHTML(filePath string) error {
-	content, err := os.ReadFile(filePath)
+var cssURLRe = regexp.MustCompile(`url\((?:"|')?(.*?)(?:"|')?\)`)
+
+func (m *mirror) parseCSSForURLs(localPath, baseURL string, depth int) error {
+	data, err := os.ReadFile(localPath)
 	if err != nil {
 		return err
 	}
-	doc, err := html.Parse(strings.NewReader(string(content)))
+	matches := cssURLRe.FindAllStringSubmatch(string(data), -1)
+	for _, mm := range matches {
+		if len(mm) < 2 {
+			continue
+		}
+		link := strings.TrimSpace(mm[1])
+		if link == "" || isSkippableLink(link) {
+			continue
+		}
+		if resolved, err := resolveWithBase(link, baseURL); err == nil {
+			if m.shouldReject(resolved) || m.isExcluded(resolved) {
+				m.incSkipped()
+				continue
+			}
+			m.enqueue(resolved, depth)
+		}
+	}
+	return nil
+}
+
+func (m *mirror) rewriteCSS(localPath, baseURL string) error {
+	data, err := os.ReadFile(localPath)
 	if err != nil {
 		return err
 	}
+	dir := filepath.Dir(localPath)
+	out := cssURLRe.ReplaceAllStringFunc(string(data), func(s string) string {
+		mm := cssURLRe.FindStringSubmatch(s)
+		if len(mm) < 2 {
+			return s
+		}
+		link := strings.TrimSpace(mm[1])
+		if link == "" || isSkippableLink(link) {
+			return s
+		}
+		resolved, err := resolveWithBase(link, baseURL)
+		if err != nil {
+			return s
+		}
+		if !m.sameDomainString(resolved) {
+			return s
+		}
+		tgt := m.localPathForURL(resolved, strings.HasSuffix(strings.ToLower(resolved), ".css") || looksLikeHTML(resolved))
+		if tgt == "" {
+			return s
+		}
+		if rel, err := filepath.Rel(dir, tgt); err == nil {
+			return "url('" + filepath.ToSlash(rel) + "')"
+		}
+		return s
+	})
+	return os.WriteFile(localPath, []byte(out), 0644)
+}
+
+func (m *mirror) rewriteLinks(localPath, baseURL string) error {
+	data, err := os.ReadFile(localPath)
+	if err != nil {
+		return err
+	}
+	doc, err := html.Parse(strings.NewReader(string(data)))
+	if err != nil {
+		return err
+	}
+
+	htmlDir := filepath.Dir(localPath)
 	var rewrite func(*html.Node)
-	htmlDir := filepath.Dir(filePath)
 	rewrite = func(n *html.Node) {
 		if n.Type == html.ElementNode {
-			for i, attr := range n.Attr {
-				if attr.Key == "href" || attr.Key == "src" {
-					if rel, err := ctx.getRelativePath(attr.Val, htmlDir); err == nil {
-						n.Attr[i].Val = rel
+			for i, a := range n.Attr {
+				if a.Key == "href" || a.Key == "src" {
+					val := a.Val
+					if strings.HasPrefix(val, "//") {
+						val = m.baseURL.Scheme + ":" + val
 					}
+					if strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") {
+						if same := m.sameDomainString(val); same {
+							tgtLocal := m.localPathForURL(val, looksLikeHTML(val))
+							if tgtLocal != "" {
+								if rel, err := filepath.Rel(htmlDir, tgtLocal); err == nil {
+									n.Attr[i].Val = filepath.ToSlash(rel)
+								}
+							}
+						}
+					}
+				}
+				if a.Key == "style" && a.Val != "" {
+					out := cssURLRe.ReplaceAllStringFunc(a.Val, func(s string) string {
+						mm := cssURLRe.FindStringSubmatch(s)
+						if len(mm) < 2 {
+							return s
+						}
+						link := strings.TrimSpace(mm[1])
+						if link == "" || isSkippableLink(link) {
+							return s
+						}
+						resolved, err := resolveWithBase(link, baseURL)
+						if err != nil || !m.sameDomainString(resolved) {
+							return s
+						}
+						tgt := m.localPathForURL(resolved, looksLikeHTML(resolved))
+						if tgt == "" {
+							return s
+						}
+						if rel, err := filepath.Rel(htmlDir, tgt); err == nil {
+							return "url('" + filepath.ToSlash(rel) + "')"
+						}
+						return s
+					})
+					n.Attr[i].Val = out
 				}
 			}
 		}
@@ -463,35 +541,163 @@ func (ctx *MirrorContext) rewriteLinksInHTML(filePath string) error {
 	}
 	rewrite(doc)
 
-	outFile, err := os.Create(filePath)
+	var rewriteStyle func(*html.Node)
+	rewriteStyle = func(n *html.Node) {
+		if n.Type == html.ElementNode && strings.EqualFold(n.Data, "style") {
+			for c := n.FirstChild; c != nil; c = c.NextSibling {
+				if c.Type == html.TextNode {
+					out := cssURLRe.ReplaceAllStringFunc(c.Data, func(s string) string {
+						mm := cssURLRe.FindStringSubmatch(s)
+						if len(mm) < 2 {
+							return s
+						}
+						link := strings.TrimSpace(mm[1])
+						if link == "" || isSkippableLink(link) {
+							return s
+						}
+						resolved, err := resolveWithBase(link, baseURL)
+						if err != nil || !m.sameDomainString(resolved) {
+							return s
+						}
+						tgt := m.localPathForURL(resolved, looksLikeHTML(resolved))
+						if tgt == "" {
+							return s
+						}
+						if rel, err := filepath.Rel(htmlDir, tgt); err == nil {
+							return "url('" + filepath.ToSlash(rel) + "')"
+						}
+						return s
+					})
+					c.Data = out
+				}
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			rewriteStyle(c)
+		}
+	}
+	rewriteStyle(doc)
+
+	out, err := os.Create(localPath)
 	if err != nil {
 		return err
 	}
-	defer outFile.Close()
-	return html.Render(outFile, doc)
+	defer out.Close()
+	return html.Render(out, doc)
 }
 
-func (ctx *MirrorContext) getRelativePath(absoluteURL, htmlDir string) (string, error) {
-	if !ctx.isSameDomain(absoluteURL) {
-		return absoluteURL, nil
+func (m *mirror) localPathForURL(raw string, isHTML bool) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
 	}
-	localPath, err := ctx.getLocalPath(absoluteURL, false)
+	p := u.Path
+	if p == "" || p == "/" {
+		p = "index.html"
+	} else if strings.HasSuffix(p, "/") {
+		p = strings.TrimPrefix(p, "/") + "/index.html"
+	} else {
+		p = strings.TrimPrefix(p, "/")
+		if isHTML && !strings.Contains(filepath.Base(p), ".") {
+			p = p + ".html"
+		}
+	}
+	p = strings.Split(p, "?")[0]
+	return filepath.Clean(filepath.Join(m.outputDir, filepath.FromSlash(p)))
+}
+
+func looksLikeHTML(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	p := u.Path
+	return p == "" || strings.HasSuffix(p, "/") || strings.HasSuffix(p, ".html") || strings.HasSuffix(p, ".htm") || !strings.Contains(p, ".")
+}
+
+func (m *mirror) sameDomain(u *url.URL) bool {
+	return strings.TrimPrefix(m.baseURL.Host, "www.") == strings.TrimPrefix(u.Host, "www.")
+}
+
+func (m *mirror) sameDomainString(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	return m.sameDomain(u)
+}
+
+func (m *mirror) shouldReject(raw string) bool {
+	if len(m.rejectExts) == 0 {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	ext := strings.ToLower(filepath.Ext(strings.Split(u.Path, "?")[0]))
+	for _, r := range m.rejectExts {
+		if ext == r {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *mirror) isExcluded(raw string) bool {
+	if len(m.excludeDirs) == 0 {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	for _, ex := range m.excludeDirs {
+		if slices.Contains(parts, ex) {
+			return true
+		}
+	}
+	return false
+}
+
+func resolveWithBase(link, base string) (string, error) {
+	b, err := url.Parse(base)
 	if err != nil {
 		return "", err
 	}
-	relativePath, err := filepath.Rel(htmlDir, localPath)
+	r, err := url.Parse(link)
 	if err != nil {
 		return "", err
 	}
-	return filepath.ToSlash(relativePath), nil
+	return b.ResolveReference(r).String(), nil
 }
 
-func (ctx *MirrorContext) printStatistics() {
-	elapsed := time.Since(ctx.stats.StartTime)
+func isSkippableLink(link string) bool {
+	link = strings.TrimSpace(link)
+	if link == "" || strings.HasPrefix(link, "#") || strings.HasPrefix(link, "javascript:") {
+		return true
+	}
+	return false
+}
+
+func (m *mirror) incDiscovered() { m.statsMu.Lock(); m.stats.discovered++; m.statsMu.Unlock() }
+func (m *mirror) incDownloaded() { m.statsMu.Lock(); m.stats.downloaded++; m.statsMu.Unlock() }
+func (m *mirror) incFailed()     { m.statsMu.Lock(); m.stats.failed++; m.statsMu.Unlock() }
+func (m *mirror) incSkipped()    { m.statsMu.Lock(); m.stats.skipped++; m.statsMu.Unlock() }
+func (m *mirror) getDiscovered() int {
+	m.statsMu.Lock()
+	v := m.stats.discovered
+	m.statsMu.Unlock()
+	return v
+}
+
+func (m *mirror) printStats() {
+	elapsed := time.Since(m.stats.start)
 	fmt.Printf("\n=== Mirroring Statistics ===\n")
-	fmt.Printf("Total URLs discovered: %d\n", ctx.stats.TotalDiscovered)
-	fmt.Printf("Successfully downloaded: %d\n", ctx.stats.TotalDownloaded)
-	fmt.Printf("Failed downloads: %d\n", ctx.stats.TotalFailed)
-	fmt.Printf("Skipped URLs: %d\n", ctx.stats.TotalSkipped)
+	fmt.Printf("Total URLs discovered: %d\n", m.stats.discovered)
+	fmt.Printf("Successfully downloaded: %d\n", m.stats.downloaded)
+	fmt.Printf("Failed downloads: %d\n", m.stats.failed)
+	fmt.Printf("Skipped URLs: %d\n", m.stats.skipped)
 	fmt.Printf("Time elapsed: %v\n", elapsed.Round(time.Second))
 }
