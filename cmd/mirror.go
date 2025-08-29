@@ -53,6 +53,8 @@ type mirrorStats struct {
 	start      time.Time
 }
 
+// InitMirroring initializes the mirroring process for the given startURL.
+// It parses the URL, creates the output directory, and sets up rejection rules.
 func InitMirroring(startURL string) error {
 	parsed, err := url.Parse(startURL)
 	if err != nil {

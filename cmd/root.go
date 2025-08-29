@@ -55,6 +55,7 @@ var rootCmd = &cobra.Command{
 	},
 }
 
+// Execute runs the root command and handles any execution errors.
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error executing command: %v\n", err)
@@ -62,6 +63,7 @@ func Execute() {
 	}
 }
 
+// init sets up command-line flags for download and mirror options.
 func init() {
 	rootCmd.Flags().BoolVarP(&Down.Bflag, "background", "B", false, "Download in background mode")
 	rootCmd.Flags().StringVarP(&Down.Oflag, "output-document", "O", "", "Write output to specified file")

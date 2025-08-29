@@ -43,6 +43,8 @@ func (tpw *ThreadSafeProgressWriter) Write(p []byte) (int, error) {
 	return n, nil
 }
 
+// DownloadFile downloads a file from the provided link.
+// It supports rate limiting and logs the start time. If no link is provided, it logs a fatal error.
 func DownloadFile(link string) {
 	if strings.Trim(link, " ") == "" {
 		log.Fatal("no link provided")
