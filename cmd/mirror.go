@@ -54,7 +54,6 @@ type mirrorStats struct {
 }
 
 // InitMirroring initializes the mirroring process for the given startURL.
-// It parses the URL, creates the output directory, and sets up rejection rules.
 func InitMirroring(startURL string) error {
 	parsed, err := url.Parse(startURL)
 	if err != nil {
@@ -68,7 +67,7 @@ func InitMirroring(startURL string) error {
 
 	var rej []string
 	if MirrorFlagsConfig.Reject != "" {
-		for e := range strings.SplitSeq(MirrorFlagsConfig.Reject, ",") {
+		for _, e := range strings.Split(MirrorFlagsConfig.Reject, ",") {
 			e = strings.TrimSpace(e)
 			if e == "" {
 				continue
@@ -79,9 +78,10 @@ func InitMirroring(startURL string) error {
 			rej = append(rej, strings.ToLower(e))
 		}
 	}
+
 	var excl []string
 	if MirrorFlagsConfig.Exclude != "" {
-		for d := range strings.SplitSeq(MirrorFlagsConfig.Exclude, ",") {
+		for _, d := range strings.Split(MirrorFlagsConfig.Exclude, ",") {
 			d = strings.Trim(strings.TrimSpace(d), "/")
 			if d != "" {
 				excl = append(excl, d)
@@ -92,12 +92,13 @@ func InitMirroring(startURL string) error {
 	var rootCtx context.Context
 	var cancel context.CancelFunc
 	if MirrorFlagsConfig.Timeout > 0 {
-		rootCtx, cancel = context.WithTimeout(context.Background(), time.Duration(MirrorFlagsConfig.Timeout)*time.Second)
+		rootCtx, cancel = context.WithTimeout(context.Background(),
+			time.Duration(MirrorFlagsConfig.Timeout)*time.Second)
 	} else {
 		rootCtx, cancel = context.WithCancel(context.Background())
 	}
 
-	client := &http.Client{Timeout: 0}
+	client := &http.Client{Timeout: 30 * time.Second}
 
 	m := &mirror{
 		baseURL:     parsed,
@@ -115,7 +116,8 @@ func InitMirroring(startURL string) error {
 	}
 	m.stats.start = time.Now()
 
-	fmt.Printf("Mirroring %s -> %s/ (depth=%d, convert=%v)\n", startURL, m.outputDir, m.maxDepth, m.convert)
+	fmt.Printf("Mirroring %s -> %s/ (depth=%d, convert=%v)\n",
+		startURL, m.outputDir, m.maxDepth, m.convert)
 	if len(rej) > 0 {
 		fmt.Printf("Reject: %s\n", strings.Join(rej, ","))
 	}
@@ -143,7 +145,12 @@ func InitMirroring(startURL string) error {
 	for i := 0; i < m.workers; i++ {
 		wg.Add(1)
 		go func(id int) {
-			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("worker %d panicked: %v", id, r)
+				}
+				wg.Done()
+			}()
 			m.workerLoop(id)
 		}(i + 1)
 	}
